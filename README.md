@@ -15,15 +15,26 @@ native `exceptionDetails` representation.
 ```js
 import { CDP } from './cdp.js'
 
-const cdp = new CDP({ base_path: './profiles', headless: true })
+const cdp = new CDP({
+  base_path: './profiles',
+  headless: true,
+})
 try {
   await cdp.call({
     method: 'Page.navigate',
-    params: { browser: 'main', target: 'page', url: 'https://example.com' },
+    params: {
+      browser: 'main',
+      target: 'page',
+      url: 'https://example.com',
+    },
   })
   const found = await cdp.call({
     method: '_.find',
-    params: { target: 'page', xpath: '//a', limit: 10 },
+    params: {
+      target: 'page',
+      xpath: '//a',
+      limit: 10,
+    },
   })
   console.log(found.result.value)
 } finally {
@@ -60,10 +71,16 @@ const [process, browser] = await launch({
 })
 try {
   const page = await browser.createTarget({ runtime: true })
-  await page.call({ method: 'Page.navigate', params: { url: 'https://example.com' } })
+  await page.call({
+    method: 'Page.navigate',
+    params: { url: 'https://example.com' },
+  })
   const value = await page.call({
     method: 'Runtime.evaluate',
-    params: { expression: 'document.title', returnByValue: true },
+    params: {
+      expression: 'document.title',
+      returnByValue: true,
+    },
   })
   console.log(value.result.value)
 } finally {
@@ -72,7 +89,10 @@ try {
 }
 
 // Attach without launching a process:
-const existing = await connect({ port: 9222, host: '127.0.0.1' })
+const existing = await connect({
+  port: 9222,
+  host: '127.0.0.1',
+})
 existing.close() // Disconnects the WebSocket.
 ```
 

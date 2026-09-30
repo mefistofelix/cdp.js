@@ -4,8 +4,9 @@ These principles apply across languages, runtimes, and frameworks.
 
 ### Simplicity and readability
 
-- Optimize for cognitive simplicity first and line count second.
+- Optimize for cognitive simplicity first and source size (characters) second, not for fewer lines.
 - Keep code minimal and readable. Do not use code golf or compress unrelated operations onto one line.
+- Format objects and option lists with one property per line and clear indentation. Do not pack multiple fields onto one line to save space.
 - Let each line express one clear idea.
 - Prefer guard clauses for empty, error, and exceptional cases so the main path stays flat.
 - Prefer structured data transformations over clever string manipulation.
