@@ -1,12 +1,9 @@
 /*
 !/.gitignore
 !/DEV_PREF.md
+!/AGENTS.md
 !/cdp.js
 !/README.md
 !/build.bat
-!/extra/
-/extra/*
-!/extra/*.js
-!/extra/*.py
 !/tests/
 !/examples/
