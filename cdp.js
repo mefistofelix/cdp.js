@@ -32,23 +32,6 @@ export class util {
         "contains(translate($1,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),translate($2,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'))")
   }
 
-  static evaluate_xpath(client, params, fn, options) {
-    if (params.target == null) throw new Error('Custom method requires target')
-    const xpath = util.normalize_xpath(params.xpath)
-    return client.call({
-      method: 'Runtime.evaluate',
-      params: {
-        browser: params.browser,
-        target: params.target,
-        expression: '(' + fn + ')(...' + JSON.stringify([xpath, options]) + ')',
-        returnByValue: true,
-        awaitPromise: true,
-        silent: true,
-        userGesture: true,
-      },
-    })
-  }
-
   static args_to_strings(args) {
     const result = []
     for (const [name, value] of Object.entries(args)) {
@@ -260,7 +243,7 @@ const custom_methods = {
       attempts: params.attempts ?? 5,
       interval_ms: params.interval_ms ?? 300,
     }
-    return util.evaluate_xpath(this, params, async (xpath, options) => {
+    return this.evaluate_xpath(params, async (xpath, options) => {
       for (let i = 0; i < options.attempts; i++) {
         const node = document.evaluate(xpath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue
         if (node) {
@@ -275,7 +258,7 @@ const custom_methods = {
   },
   '_.find'(params) {
     const limit = params.limit ?? 20
-    return util.evaluate_xpath(this, params, (xpath, limit) => {
+    return this.evaluate_xpath(params, (xpath, limit) => {
       const nodes = document.evaluate(xpath, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null)
       const items = []
       for (let i = 0; i < Math.min(nodes.snapshotLength, limit); i++) {
@@ -308,6 +291,23 @@ export class cdp extends EventTarget {
     this.options = options
     this.browsers = Object.create(null)
     this.custom_methods = { ...custom_methods }
+  }
+
+  evaluate_xpath(params, fn, options) {
+    if (params.target == null) throw new Error('Custom method requires target')
+    const xpath = util.normalize_xpath(params.xpath)
+    return this.call({
+      method: 'Runtime.evaluate',
+      params: {
+        browser: params.browser,
+        target: params.target,
+        expression: '(' + fn + ')(...' + JSON.stringify([xpath, options]) + ')',
+        returnByValue: true,
+        awaitPromise: true,
+        silent: true,
+        userGesture: true,
+      },
+    })
   }
 
   _detach(browser, sessionId) {

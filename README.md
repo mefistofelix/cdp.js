@@ -155,7 +155,7 @@ Built-in custom methods use `Runtime.evaluate` and return its native result:
 
 Both require `target`. `util.normalize_xpath(xpath)` rewrites `ends-with()` and
 ASCII `icontains()` into XPath 1 expressions; it is not a full XPath parser.
-`util.evaluate_xpath(client, params, fn, options)` runs a serialized function
+`client.evaluate_xpath(params, fn, options)` runs a serialized function
 with the normalized XPath and options in the target.
 
 `custom_methods` is a public object. Assign, replace or delete entries directly.
