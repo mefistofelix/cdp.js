@@ -199,6 +199,7 @@ local configuration.
 | `user_data_dir` | absolute path string, `<base_path>/<name>` | Chromium user-data directory containing profiles such as `Default`. The generated default is absolute; explicit overrides should be absolute too. |
 | `executable_path` | string, automatic discovery | Executable to spawn; takes precedence over `CDP_BROWSER`. |
 | `headless` | boolean, `false` | When true, add `headless: 'new'` and default `window-size: '1440,900'`. |
+| `windowsHide` | boolean, `true` | Hide the spawned process's console on Windows. Passed to Node's `spawn`, independently of `headless`; does not hide the parent terminal. |
 | `extensions` | boolean, `false` | When true, omit the two extension-disabling switches; does not install extensions. |
 | `images` | boolean, `true` | When false, request `blink-settings: 'imagesEnabled=false'`; controls loading, not image processing. |
 | `translations` | boolean, `false` | Set translation preferences and, unless true, disable translation feature IDs. |
