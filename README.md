@@ -2,12 +2,12 @@
 
 Low-level Chromium DevTools Protocol library for Node.js 22.19+.
 No npm packages, `package.json`, database or utility dependencies.
-Exports: `jsrpc`, `cdp`, `util`, also grouped in the default export.
+Exports: `util`, `jsrpc`, `browser`, `cdp`, also grouped in the default export.
 
 ## Calls
 
 ```js
-import { cdp, util } from './cdp.js'
+import { cdp, util, browser } from './cdp.js'
 
 const client = new cdp({
   base_path: './profiles',
@@ -95,12 +95,12 @@ await client.call({
 })
 ```
 
-CLI keys omit `--`. `util.build_browser_args(options)` returns a mutable object. `util.args_to_strings()`
+CLI keys omit `--`. `browser.build_args(options)` returns a mutable object. `util.args_to_strings()`
 materializes it only when launching: true emits a flag; false/null/undefined omit
 it; other values emit `--key=value`; arrays are joined with commas.
 
 ```js
-const args = util.build_browser_args({
+const args = browser.build_args({
   user_data_dir: './profiles/example',
   args: {
     'mute-audio': false,
@@ -113,14 +113,14 @@ console.log(util.args_to_strings(args))
 ```
 
 Local launch merges translation/sign-in defaults with `options.preferences`.
-`util.set_preferences(filename, preferences)` reads the JSON file, sets the dotted
+`browser.update_profile_preferences(filename, preferences)` reads the JSON file, sets the dotted
 keys and preserves other values. It creates missing directories/files; malformed
 JSON and filesystem errors propagate. Local launch applies this to the selected
 profile's `Preferences` before starting Chrome. `args['profile-directory']`
 selects the profile directory, otherwise `Default` is used.
 
 ```js
-await util.set_preferences('./profiles/example/Default/Preferences', {
+await browser.update_profile_preferences('./profiles/example/Default/Preferences', {
   'translate.enabled': false,
   'download.prompt_for_download': false,
 })
@@ -188,11 +188,11 @@ subscriptions, filtering, buffering or polling.
 Public mappings use direct object indexing:
 
 ```js
-const browser = client.browsers.main
-const target = browser.targets.example
+const record = client.browsers.main
+const target = record.targets.example
 console.log(target.targetId, target.sessionId, target.binding)
-console.log(browser.target_info[target.targetId]) // Native info plus sessionId
-console.log(browser.session_targets[target.sessionId]) // targetId
+console.log(record.target_info[target.targetId]) // Native info plus sessionId
+console.log(record.session_targets[target.sessionId]) // targetId
 ```
 
 ## Raw transport and utilities
@@ -211,11 +211,18 @@ try {
 
 `jsrpc.req({method, params, sessionId}, timeout_ms)` returns the native result.
 `notify(request)` sends a raw message. Socket `notify` events contain unmodified
-CDP notifications. `pending` is a public object holding outstanding requests.
+CDP notifications. Pending requests reject on timeout or disconnection; their
+listeners are removed on completion.
+The public `pending` object contains their promises, indexed by request ID.
 
-Static utilities also include `emit(target, name, detail)`,
-`find_browser_executable()` and `launch(options)`. `launch` returns `{proc, url}`; the caller
-owns that process. `on_first(target, 'event1 event2', timeout_ms)` works with
+The `browser` class only contains static helpers for local browser launch:
+`find_executable_path()`, `build_args(options)`,
+`update_profile_preferences(filename, preferences)` and `launch(options)`.
+`browser.launch()` returns `{proc, url}`; the caller owns that process.
+Connections, targets, sessions and protocol calls belong to `cdp`.
+
+`util.emit(target, name, detail)` dispatches a CustomEvent.
+`util.on_first(target, 'event1 event2', timeout_ms)` works with
 EventTarget and EventEmitter, returns `{type, args}` and removes losing listeners.
 
 `client.close()` closes the processes it launched and disconnects external

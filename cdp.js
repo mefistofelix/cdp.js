@@ -1,7 +1,8 @@
 import * as child_process from 'node:child_process'
 import * as fs from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import * as path from 'node:path'
-import { once } from 'node:events'
+import { once, setMaxListeners } from 'node:events'
 
 export class util {
   static emit(target, name, detail) {
@@ -12,14 +13,12 @@ export class util {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(new Error('Timed out waiting for ' + names)), timeout_ms)
     try {
-      const events = []
-      for (const type of names.split(' ')) {
-        events.push(once(target, type, { signal: controller.signal }).then(args => ({
+      return await Promise.race(names.split(' ').map(type =>
+        once(target, type, { signal: controller.signal }).then(args => ({
           type,
           args,
-        })))
-      }
-      return await Promise.race(events)
+        })),
+      ))
     } finally {
       clearTimeout(timer)
       controller.abort()
@@ -50,7 +49,66 @@ export class util {
     })
   }
 
-  static async find_browser_executable() {
+  static args_to_strings(args) {
+    const result = []
+    for (const [name, value] of Object.entries(args)) {
+      if (value === false || value == null) continue
+      const text = Array.isArray(value) ? value.join(',') : value
+      result.push('--' + name + (value === true ? '' : '=' + text))
+    }
+    return result
+  }
+}
+
+export class jsrpc extends WebSocket {
+  constructor(url, options = {}) {
+    super(url)
+    setMaxListeners(0, this)
+    this.id = 0
+    this.pending = {}
+    this.timeout_ms = options.request_timeout_ms ?? 30000
+    this.addEventListener('message', event => {
+      const message = JSON.parse(event.data)
+      util.emit(this, message.id === undefined ? 'notify' : 'rpc_' + message.id, message)
+    })
+  }
+
+  async req(request, timeout_ms = this.timeout_ms) {
+    if (this.readyState !== WebSocket.OPEN) throw new Error('WebSocket is not open')
+    const id = ++this.id
+    const data = JSON.stringify({
+      ...request,
+      id,
+    })
+    this.pending[id] = util.on_first(this, 'rpc_' + id + ' close error', timeout_ms)
+    try {
+      this.send(data)
+      const event = await this.pending[id]
+      if (event.type !== 'rpc_' + id) throw new Error('WebSocket connection closed')
+      const response = event.args[0].detail
+      if (response.error) {
+        const error = new Error(response.error.message, {
+          cause: {
+            req: request,
+            ret: response,
+          },
+        })
+        error.cdp = response
+        throw error
+      }
+      return response.result
+    } finally {
+      delete this.pending[id]
+    }
+  }
+
+  notify(request) {
+    this.send(JSON.stringify(request))
+  }
+}
+
+export class browser {
+  static find_executable_path() {
     if (process.env.CDP_BROWSER) return process.env.CDP_BROWSER
     const candidates = process.platform === 'win32'
       ? [process.env.ProgramFiles, process.env['ProgramFiles(x86)'], process.env.LOCALAPPDATA]
@@ -67,18 +125,12 @@ export class util {
         '/usr/bin/chromium-browser',
         '/usr/bin/microsoft-edge',
       ]
-    for (const candidate of candidates) {
-      try {
-        await fs.access(candidate)
-        return candidate
-      } catch (error) {
-        if (error.code !== 'ENOENT') throw error
-      }
-    }
-    throw new Error('Set executable_path or CDP_BROWSER to a Chromium executable')
+    const executable = candidates.find(existsSync)
+    if (!executable) throw new Error('Set executable_path or CDP_BROWSER to a Chromium executable')
+    return executable
   }
 
-  static build_browser_args(options = {}) {
+  static build_args(options = {}) {
     const args = {
       'enable-automation': true,
       'mute-audio': true,
@@ -148,17 +200,7 @@ export class util {
     return Object.assign(args, options.args)
   }
 
-  static args_to_strings(args) {
-    const result = []
-    for (const [name, value] of Object.entries(args)) {
-      if (value === false || value == null) continue
-      const text = Array.isArray(value) ? value.join(',') : value
-      result.push('--' + name + (value === true ? '' : '=' + text))
-    }
-    return result
-  }
-
-  static async set_preferences(filename, preferences) {
+  static async update_profile_preferences(filename, preferences) {
     await fs.mkdir(path.dirname(filename), { recursive: true })
     const content = await fs.readFile(filename, 'utf8').catch(error => {
       if (error.code !== 'ENOENT') throw error
@@ -175,16 +217,15 @@ export class util {
   }
 
   static async launch(options) {
-    const args = util.build_browser_args(options)
-    const profile = args['profile-directory'] || 'Default'
-    const filename = path.join(args['user-data-dir'], profile, 'Preferences')
-    await util.set_preferences(filename, {
+    const args = browser.build_args(options)
+    const filename = path.join(args['user-data-dir'], args['profile-directory'] || 'Default', 'Preferences')
+    await browser.update_profile_preferences(filename, {
       'translate.enabled': options.translations === true,
       'signin.allowed': options.login === true,
       'signin.allowed_on_next_startup': options.login === true,
       ...options.preferences,
     })
-    const proc = child_process.spawn(options.executable_path || await util.find_browser_executable(), [...util.args_to_strings(args), 'about:blank'], {
+    const proc = child_process.spawn(options.executable_path || browser.find_executable_path(), [...util.args_to_strings(args), 'about:blank'], {
       windowsHide: true,
       stdio: ['ignore', 'ignore', 'pipe'],
     })
@@ -210,62 +251,6 @@ export class util {
       proc.stderr.removeListener('data', data)
       proc.stderr.resume()
     }
-  }
-}
-
-export class jsrpc extends WebSocket {
-  constructor(url, options = {}) {
-    super(url)
-    this.id = 0
-    this.pending = {}
-    this.timeout_ms = options.request_timeout_ms ?? 30000
-    this.addEventListener('message', event => {
-      const message = JSON.parse(event.data)
-      if (message.id !== undefined) this.pending[message.id]?.resolve(message)
-      else util.emit(this, 'notify', message)
-    })
-    for (const name of ['close', 'error']) {
-      this.addEventListener(name, () => {
-        for (const request of Object.values(this.pending)) {
-          request.reject(new Error('WebSocket connection closed'))
-        }
-      })
-    }
-  }
-
-  async req(request, timeout_ms = this.timeout_ms) {
-    const id = ++this.id
-    const pending = Promise.withResolvers()
-    this.pending[id] = pending
-    const timer = setTimeout(() => {
-      pending.reject(new Error(request.method + ' timed out; its execution outcome is unknown'))
-    }, timeout_ms)
-    try {
-      this.notify({
-        ...request,
-        id,
-      })
-      const response = await pending.promise
-      if (response.error) {
-        const error = new Error(response.error.message, {
-          cause: {
-            req: request,
-            ret: response,
-          },
-        })
-        error.cdp = response
-        throw error
-      }
-      return response.result
-    } finally {
-      clearTimeout(timer)
-      delete this.pending[id]
-    }
-  }
-
-  notify(request) {
-    if (this.readyState !== WebSocket.OPEN) throw new Error('WebSocket is not open')
-    this.send(JSON.stringify(request))
   }
 }
 
@@ -341,8 +326,7 @@ export class cdp extends EventTarget {
     const targetId = params.targetInfo?.targetId || params.targetId || browser.session_targets[sessionId]
     const target = Object.values(browser.targets).find(value => value.targetId === targetId)
     if (params.targetInfo) {
-      browser.target_info[targetId] ??= {}
-      Object.assign(browser.target_info[targetId], params.targetInfo)
+      Object.assign(browser.target_info[targetId] ??= {}, params.targetInfo)
     }
     if (message.method === 'Target.attachedToTarget') {
       this._detach(browser, browser.target_info[targetId]?.sessionId)
@@ -366,36 +350,36 @@ export class cdp extends EventTarget {
     }
   }
 
-  async _connect(browser) {
-    let url = browser.websocket_url
-    if (!url && (browser.http_url || browser.port)) {
-      const discovery = new URL(browser.http_url || 'http://' + (browser.host || '127.0.0.1') + ':' + browser.port)
+  async _connect(record) {
+    let url = record.websocket_url
+    if (!url && (record.http_url || record.port)) {
+      const discovery = new URL(record.http_url || 'http://' + (record.host || '127.0.0.1') + ':' + record.port)
       if (!discovery.pathname.endsWith('/json/version')) discovery.pathname = discovery.pathname.replace(/\/$/, '') + '/json/version'
-      const response = await fetch(discovery, { signal: AbortSignal.timeout(browser.connect_timeout_ms ?? 15000) })
+      const response = await fetch(discovery, { signal: AbortSignal.timeout(record.connect_timeout_ms ?? 15000) })
       if (!response.ok) throw new Error('CDP discovery: HTTP ' + response.status)
       url = (await response.json()).webSocketDebuggerUrl
     }
     if (!url) {
-      if (browser.proc?.exitCode === null && browser.proc.signalCode === null) url = browser.socket.url
+      if (record.proc?.exitCode === null && record.proc.signalCode === null) url = record.socket.url
       else {
-        const launched = await util.launch(browser)
-        browser.proc = launched.proc
+        const launched = await browser.launch(record)
+        record.proc = launched.proc
         url = launched.url
       }
     }
-    const socket = browser.socket = new jsrpc(url, browser)
-    browser.target_info = {}
-    browser.session_targets = {}
-    socket.addEventListener('notify', event => this._notify(browser, event.detail))
+    const socket = record.socket = new jsrpc(url, record)
+    record.target_info = {}
+    record.session_targets = {}
+    socket.addEventListener('notify', event => this._notify(record, event.detail))
     socket.addEventListener('close', event => {
-      if (browser.socket !== socket) return
-      for (const sessionId of Object.keys(browser.session_targets)) this._detach(browser, sessionId)
+      if (record.socket !== socket) return
+      for (const sessionId of Object.keys(record.session_targets)) this._detach(record, sessionId)
       util.emit(this, 'close', {
-        browser: browser.name,
+        browser: record.name,
         code: event.code,
       })
     })
-    const event = await util.on_first(socket, 'open error close', browser.connect_timeout_ms ?? 15000)
+    const event = await util.on_first(socket, 'open error close', record.connect_timeout_ms ?? 15000)
     if (event.type !== 'open') throw new Error('Unable to open CDP WebSocket')
     await socket.req({
       method: 'Target.setAutoAttach',
@@ -414,26 +398,24 @@ export class cdp extends EventTarget {
   async _target(browser, target) {
     const socket = browser.socket
     if (!Object.hasOwn(browser.target_info, target.targetId)) {
-      const result = await socket.req({
+      target.targetId = (await socket.req({
         method: 'Target.createTarget',
         params: {
           url: 'about:blank',
           background: true,
           ...target.create_params,
         },
-      })
-      target.targetId = result.targetId
+      })).targetId
     }
     let sessionId = browser.target_info[target.targetId]?.sessionId
     if (!sessionId) {
-      const result = await socket.req({
+      sessionId = (await socket.req({
         method: 'Target.attachToTarget',
         params: {
           targetId: target.targetId,
           flatten: true,
         },
-      })
-      sessionId = result.sessionId
+      })).sessionId
       browser.target_info[target.targetId].sessionId = sessionId
       browser.session_targets[sessionId] = target.targetId
     }
@@ -553,5 +535,6 @@ export class cdp extends EventTarget {
 export default {
   util,
   jsrpc,
+  browser,
   cdp,
 }

@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
+import { getEventListeners } from 'node:events'
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
-import api, { jsrpc, cdp, util } from '../cdp.js'
+import api, { jsrpc, cdp, util, browser } from '../cdp.js'
 
 const build = path.resolve('build/tests')
 await fs.mkdir(build, { recursive: true })
@@ -30,10 +31,10 @@ async function fixture(t, options = {}) {
 }
 
 test('public exports contain jsrpc, cdp and static utilities', async () => {
-  assert.deepEqual(Object.keys(api).sort(), ['cdp', 'jsrpc', 'util'])
+  assert.deepEqual(Object.keys(api).sort(), ['browser', 'cdp', 'jsrpc', 'util'])
   assert.equal(api.cdp, cdp)
   assert.equal(api.jsrpc, jsrpc)
-  assert.deepEqual(Object.keys(await import('../cdp.js')).sort(), ['cdp', 'default', 'jsrpc', 'util'])
+  assert.deepEqual(Object.keys(await import('../cdp.js')).sort(), ['browser', 'cdp', 'default', 'jsrpc', 'util'])
 })
 
 test('custom methods are ordinary mutable handlers and return their own results', async t => {
@@ -127,6 +128,15 @@ test('structured calls return native results; concurrent calls reuse one page', 
   await call(client, 'Target.closeTarget', { targetId: tid }, null)
   await call(client, 'Runtime.evaluate', { expression: '1' })
   assert.notEqual(record.targets.page.targetId, tid)
+
+  const socket = record.socket
+  const listeners = getEventListeners(socket, 'close').length
+  const concurrent = await Promise.all(Array.from({ length: 20 }, (_, value) => call(client, 'Runtime.evaluate', {
+    expression: String(value),
+    returnByValue: true,
+  })))
+  assert.deepEqual(concurrent.map(response => response.result.value), Array.from({ length: 20 }, (_, value) => value))
+  assert.equal(getEventListeners(socket, 'close').length, listeners)
 })
 
 test('custom click/find route through Runtime.evaluate, with no separate image helpers', { timeout: 60000 }, async t => {
@@ -198,8 +208,10 @@ test('direct events carry labels; reconnect retains only in-memory target routin
     returnByValue: true,
   })).result.value, 'undefined')
   const closed = util.on_first(record.socket, 'close')
+  const disconnected = util.on_first(client, 'close')
   record.socket.close()
   await closed
+  assert.equal((await disconnected).args[0].detail.browser, 'main')
   assert.equal((await call(client, 'Runtime.evaluate', {
     expression: '21 * 2',
     returnByValue: true,
@@ -295,6 +307,8 @@ test('timeouts, disconnects and launch failures reject without hanging or replay
   const client = await fixture(t)
   await call(client, 'Runtime.evaluate', { expression: '1' })
   const socket = client.browsers.main.socket
+  const closeListeners = getEventListeners(socket, 'close').length
+  const errorListeners = getEventListeners(socket, 'error').length
   const target = client.browsers.main.targets.page
   const sessionId = target.sessionId
   const timed = socket.req({
@@ -305,8 +319,10 @@ test('timeouts, disconnects and launch failures reject without hanging or replay
     },
     sessionId,
   }, 40)
-  await assert.rejects(timed, /execution outcome is unknown/)
+  await assert.rejects(timed, { name: 'AbortError' })
   assert.equal(Object.keys(socket.pending).length, 0)
+  assert.equal(getEventListeners(socket, 'close').length, closeListeners)
+  assert.equal(getEventListeners(socket, 'error').length, errorListeners)
   const slow = socket.req({
     method: 'Runtime.evaluate',
     params: {
@@ -319,6 +335,8 @@ test('timeouts, disconnects and launch failures reject without hanging or replay
   socket.close()
   await rejected
   assert.equal(Object.keys(socket.pending).length, 0)
+  assert.equal(getEventListeners(socket, 'close').length, closeListeners)
+  assert.equal(getEventListeners(socket, 'error').length, errorListeners)
   await assert.rejects(call(client, 'Browser.getVersion', {}, null, {
     name: 'missing',
     executable_path: path.join(build, 'missing-browser'),
@@ -328,7 +346,7 @@ test('timeouts, disconnects and launch failures reject without hanging or replay
 })
 
 test('CLI options remain editable key/value objects until argv materialization', () => {
-  const args = util.build_browser_args({
+  const args = browser.build_args({
     user_data_dir: 'profile with spaces',
     headless: true,
     extensions: true,
@@ -365,7 +383,7 @@ test('CLI options remain editable key/value objects until argv materialization',
 test('generic preferences update nested keys, preserve siblings and accept overrides', async () => {
   const directory = await fs.mkdtemp(path.join(build, 'preferences-'))
   const filename = path.join(directory, 'Default', 'Preferences')
-  await util.set_preferences(filename, {
+  await browser.update_profile_preferences(filename, {
     'translate.enabled': true,
     'translate.other': 42,
     'custom.keep': 'value',
@@ -378,7 +396,7 @@ test('generic preferences update nested keys, preserve siblings and accept overr
   }
   assert.equal(preferences['translate.enabled'], true)
   assert.equal(preferences['signin.allowed'], false)
-  await util.set_preferences(filename, preferences)
+  await browser.update_profile_preferences(filename, preferences)
   const result = JSON.parse(await fs.readFile(filename, 'utf8'))
   assert.deepEqual(result.translate, {
     enabled: true,
