@@ -1,67 +1,169 @@
 # cdp.js
 
-Low-level Chromium DevTools Protocol library. Node.js 22.19+, Chrome/Chromium/Edge,
-and no npm dependencies. The original reference implementations and unused
-`x.js` utilities are in `extra/`.
+Low-level Chromium DevTools Protocol library for Node.js 22.19+.
+No npm packages, `package.json`, database or utility dependencies.
+Exports: `jsrpc`, `cdp`, `util`, also grouped in the default export.
 
 ## Calls
 
-Each call sends one operation. Native methods use `{method, params}`; small local
-helpers use the reserved `_.` namespace. Results are native CDP `result` objects;
-protocol errors reject with the raw response in `error.cdp` and request/response
-in `error.cause`. JavaScript exceptions from `Runtime.evaluate` retain their
-native `exceptionDetails` representation.
-
 ```js
-import { CDP } from './cdp.js'
+import { cdp, util } from './cdp.js'
 
-const cdp = new CDP({
+const client = new cdp({
   base_path: './profiles',
   headless: true,
+  extensions: false,
+  images: false,
+  translations: false,
+  login: false,
+  args: {
+    'window-size': '1280,800',
+  },
+  preferences: {
+    'download.prompt_for_download': false,
+  },
 })
+
 try {
-  await cdp.call({
+  await client.call({
     method: 'Page.navigate',
     params: {
       browser: 'main',
-      target: 'page',
+      target: {
+        name: 'example',
+        binding: 'send_to_host',
+        runtime: true,
+      },
       url: 'https://example.com',
     },
   })
-  const found = await cdp.call({
-    method: '_.find',
-    params: {
-      target: 'page',
-      xpath: '//a',
-      limit: 10,
-    },
-  })
-  console.log(found.result.value)
+  console.log(client.browsers.main.targets.example.binding)
 } finally {
-  await cdp.close()
+  await client.close()
 }
 ```
 
-`params.browser` and `params.target` select routing; they are extracted before
-the remaining parameters are sent to Chrome. The caller's object is not mutated.
-Browser defaults to `main`; omitting `target` sends a browser-level command. Named browsers/pages are created
-on first use and reused. Concurrent calls share connection and page creation.
-Await dependent commands yourself, including any navigation readiness you need.
+`browser` and `target` are routing fields inside `params`, removed before the
+native request is sent. The caller's object is not mutated. Browser defaults to
+`main`; omitting `target` sends a browser-level command. Strings are shorthand
+for `{name: 'label'}`. Configuration is stored on first use; records are public
+and can be edited directly. Browser names are directory labels under `base_path`.
 
-| Custom method | Parameters | Native Runtime result |
-| --- | --- | --- |
-| `_.click` | `xpath`, `attempts` (1–20, default 5), `interval_ms` (0–5000, default 300) | Remote boolean in `result.value` |
-| `_.find` | `xpath`, `limit` (1–100, default 20) | `{count, items}` in `result.value`; element/text metadata and rectangles |
+Named browsers and targets are created on demand. Concurrent requests share
+connection and initialization. Creating a target does not close other tabs.
+Closed or crashed targets are recreated on their next use; reconnecting reuses
+surviving targets and reapplies their initialization. Commands are never replayed.
+Await navigation readiness and other dependent operations yourself.
 
-Both require a page target and translate to `Runtime.evaluate`. XPath accepts
-the original `ends-with()` and `icontains()` rewrites, with ASCII case folding on
-both `icontains()` operands. These simple rewrites are not a full XPath 2 parser.
+Results are native CDP `result` objects. Protocol errors reject with the response
+in `error.cdp` and the request/response in `error.cause`. JavaScript exceptions
+from `Runtime.evaluate` retain native `exceptionDetails`.
 
-`cdp.custom_methods` and `page.custom_methods` are ordinary public objects keyed
-by the full method name. Assign, replace or delete entries directly:
+## Browser options
+
+Constructor options supply defaults; a `params.browser` object configures a
+particular browser. Launch settings apply when starting a local browser.
+
+| Option | Default / meaning |
+| --- | --- |
+| `headless` | false |
+| `extensions` | false; true allows browser extensions |
+| `images` | true; false disables image loading |
+| `translations` | false; controls translation preferences and feature flags |
+| `login` | false; controls browser sign-in preferences, prompts and sync flags |
+| `executable_path` | Automatic Chrome/Chromium/Edge discovery; `CDP_BROWSER` overrides discovery |
+| `user_data_dir` | `<base_path>/<name>`; `base_path` defaults to `.cdp` |
+| `args` | Object of command-line switches, merged over generated defaults |
+| `preferences` | Object of dotted preference keys, merged over generated defaults |
+| `connect_timeout_ms` | 15000; discovery, launch readiness and WebSocket handshake |
+| `request_timeout_ms` | 30000; each protocol request |
+| `websocket_url` | Attach directly to an existing browser WebSocket |
+| `http_url` | Attach via HTTP(S) base URL or exact `/json/version` URL |
+| `port`, `host` | Attach via a debugging port; host defaults to `127.0.0.1` |
+
+Use one attachment endpoint. For example:
 
 ```js
-cdp.custom_methods['_.title'] = function (params) {
+await client.call({
+  method: 'Browser.getVersion',
+  params: {
+    browser: {
+      name: 'remote',
+      port: 9222,
+    },
+  },
+})
+```
+
+CLI keys omit `--`. `util.build_browser_args(options)` returns a mutable object. `util.args_to_strings()`
+materializes it only when launching: true emits a flag; false/null/undefined omit
+it; other values emit `--key=value`; arrays are joined with commas.
+
+```js
+const args = util.build_browser_args({
+  user_data_dir: './profiles/example',
+  args: {
+    'mute-audio': false,
+    'enable-features': ['FeatureOne', 'FeatureTwo'],
+  },
+})
+args['window-size'] = '800,600'
+delete args['hide-crash-restore-bubble']
+console.log(util.args_to_strings(args))
+```
+
+Local launch merges translation/sign-in defaults with `options.preferences`.
+`util.set_preferences(filename, preferences)` reads the JSON file, sets the dotted
+keys and preserves other values. It creates missing directories/files; malformed
+JSON and filesystem errors propagate. Local launch applies this to the selected
+profile's `Preferences` before starting Chrome. `args['profile-directory']`
+selects the profile directory, otherwise `Default` is used.
+
+```js
+await util.set_preferences('./profiles/example/Default/Preferences', {
+  'translate.enabled': false,
+  'download.prompt_for_download': false,
+})
+```
+
+These are ordinary browser profile preferences; browser/target/session mappings
+remain only in memory. Attachment to an existing browser does not alter its
+profile preferences or launch arguments.
+
+## Targets, custom methods and events
+
+| Target option | Default / behavior |
+| --- | --- |
+| `create_params` | Native creation parameters over `url: 'about:blank'`, `background: true` |
+| `initialize` | true; false skips domain setup |
+| `runtime` | `'bootstrap'`: enable during setup, then disable; true keeps reporting; false leaves it untouched |
+| `page`, `network`, `service_worker` | true; enable the corresponding domains |
+| `focus_emulation` | true |
+| `binding` | `'_send_to_cdp'`; string changes its name; false disables it |
+| `background_service` | true; clear, observe and record `pushMessaging` |
+
+Unsupported setup commands are collected in `target.setup_errors`. The effective
+binding name is stored directly in `client.browsers[name].targets[label].binding`.
+Changing a stored setting applies on subsequent initialization, not immediately
+to an already initialized session.
+
+Built-in custom methods use `Runtime.evaluate` and return its native result:
+
+- `_.click`: `xpath`, `attempts` (default 5), `interval_ms` (default 300).
+- `_.find`: `xpath`, `limit` (default 20); returns `{count, items}` in `result.value`,
+  including node metadata and element rectangles.
+
+Both require `target`. `util.normalize_xpath(xpath)` rewrites `ends-with()` and
+ASCII `icontains()` into XPath 1 expressions; it is not a full XPath parser.
+`util.evaluate_xpath(client, params, fn, options)` runs a serialized function
+with the normalized XPath and options in the target.
+
+`custom_methods` is a public object. Assign, replace or delete entries directly.
+Each instance has its own copy. Handlers receive `params`, with `this` bound to
+that `cdp` instance, and run before any automatic browser/target creation.
+
+```js
+client.custom_methods['_.title'] = function (params) {
   return this.call({
     method: 'Runtime.evaluate',
     params: {
@@ -70,171 +172,60 @@ cdp.custom_methods['_.title'] = function (params) {
       returnByValue: true,
     },
   })
-
-cdp.custom_methods['_.find'] = async function (params) {
-  return { xpath: params.xpath }
 }
+delete client.custom_methods['_.click']
 
-delete cdp.custom_methods['_.click']
+client.addEventListener('Runtime.bindingCalled', event => {
+  console.log(event.detail.browser, event.detail.target, event.detail.payload)
+})
 ```
 
-Handlers receive the original `params` and have `this` bound to the caller
-(`CDP` or page). Their return value or promise becomes the call result; thrown
-errors propagate unchanged. Custom handlers can run local code or call native
-CDP methods, and do not need a target unless their own implementation requires
-one. Dispatch happens before browser launch or page creation.
+The manager emits `notify` with a CDP message and emits the native method name
+with its parameters. Browser/target labels are added to those parameters.
+`close` reports WebSocket closure. Events are delivered directly, without
+subscriptions, filtering, buffering or polling.
 
-Each instance starts with its own shallow copy of the exported `custom_methods`
-object containing `_.click` and `_.find`. The object can also be replaced
-entirely. Changing the exported defaults affects subsequently created instances.
-
-## Explicit browser/page API
-
-The lower-level API exposes browser and page sessions directly, with the same
-operation shape and return semantics:
+Public mappings use direct object indexing:
 
 ```js
-import { launch, connect } from './cdp.js'
+const browser = client.browsers.main
+const target = browser.targets.example
+console.log(target.targetId, target.sessionId, target.binding)
+console.log(browser.target_info[target.targetId]) // Native info plus sessionId
+console.log(browser.session_targets[target.sessionId]) // targetId
+```
 
-const [process, browser] = await launch({
-  user_data_dir: './profile',
-  headless: true,
-})
+## Raw transport and utilities
+
+```js
+import { jsrpc, util } from './cdp.js'
+
+const socket = new jsrpc('ws://127.0.0.1:9222/devtools/browser/your-id')
+await util.on_first(socket, 'open error close')
 try {
-  const page = await browser.createTarget({ runtime: true })
-  await page.call({
-    method: 'Page.navigate',
-    params: { url: 'https://example.com' },
-  })
-  const value = await page.call({
-    method: 'Runtime.evaluate',
-    params: {
-      expression: 'document.title',
-      returnByValue: true,
-    },
-  })
-  console.log(value.result.value)
+  console.log(await socket.req({ method: 'Browser.getVersion' }))
 } finally {
-  await browser.call({ method: 'Browser.close' })
-  browser.close()
+  socket.close()
 }
-
-// Attach without launching a process:
-const existing = await connect({
-  port: 9222,
-  host: '127.0.0.1',
-})
-existing.close() // Disconnects the WebSocket.
 ```
 
-`connect()` also accepts a browser-level WebSocket URL, an HTTP(S) discovery base
-URL or exact `/json/version` URL. `attachTarget(targetId, options)` attaches to an
-existing page. `wscdp` and `wsjrpc` remain available for raw session requests.
-`wsjrpc.req({method, params, sessionId})` returns the protocol result.
+`jsrpc.req({method, params, sessionId}, timeout_ms)` returns the native result.
+`notify(request)` sends a raw message. Socket `notify` events contain unmodified
+CDP notifications. `pending` is a public object holding outstanding requests.
 
-The default export retains `launch`, `connect`, `wscdp`, `wsjrpc`, `CDP`, and
-`custom_methods`.
-`launch(profile, executable)` still returns `[process, browser]`. Migrate old
-`call(method, params)` to `call({method, params})`, and `page.click()` to
-`page.call({method:'_.click', params:{xpath:...}})`.
+Static utilities also include `emit(target, name, detail)`,
+`find_browser_executable()` and `launch(options)`. `launch` returns `{proc, url}`; the caller
+owns that process. `on_first(target, 'event1 event2', timeout_ms)` works with
+EventTarget and EventEmitter, returns `{type, args}` and removes losing listeners.
 
-## Options
-
-Browser/target strings are shorthand for `{name: 'label'}`. The manager remembers
-options by name. Conflicting changes to a live or opening resource reject;
-close it first or select another name.
-
-| Browser option | Behavior |
-| --- | --- |
-| `headless` | Default false |
-| `executable_path` | Explicit Chromium executable; automatic discovery otherwise |
-| `user_data_dir` | Profile path; manager default is `<base_path>/<name>`, base path defaults to `.cdp` |
-| `extensions`, `images` | Browser loading settings, defaults false and true |
-| `args` | Extra argv; matching switches replace defaults |
-| `websocket_url` | Attach directly to a browser-level WS(S) endpoint |
-| `http_url` | Attach through HTTP(S) discovery |
-| `port`, `host` | Attach to an existing debugging port; host defaults to `127.0.0.1` |
-| `connect_timeout_ms` | Connection/launch deadline; default 15000 |
-| `request_timeout_ms` | Per-command deadline; default 30000 |
-
-Only one endpoint can be supplied. Attachment cannot be combined with explicit
-local launch options. Constructor options provide browser defaults.
-`CDP_BROWSER` (or `MRMCP_CDP_BROWSER`) overrides executable discovery.
-Managed launches use OS-assigned debugging ports; `args` cannot override
-headless, profile or remote-debugging switches.
-
-| Target option | Default / behavior |
-| --- | --- |
-| `create_params` | Native options over `{url:'about:blank', background:true}`; `forTab:true` unsupported |
-| `initialize` | true; false skips setup but always resumes the debugger |
-| `runtime` | `'bootstrap'`: enable during setup then disable; true keeps reporting, false leaves it untouched |
-| `page`, `network`, `service_worker` | true; enable the corresponding domains |
-| `focus_emulation` | true |
-| `binding` | Binding name, default `'_send_to_cdp'`; false disables it; true retains the default name |
-| `background_service` | true; clears, observes and records `pushMessaging` |
-
-Unsupported setup commands are collected in `page.setup_errors`. Target options
-survive reconnection/recreation in the same manager. Creation parameters do not
-navigate an existing page. Closed/crashed targets are recreated on the next call.
-Commands are never replayed automatically after timeout or connection failure.
-
-The binding name belongs to the target and is available in the existing maps:
-
-```js
-await cdp.call({
-  method: 'Runtime.evaluate',
-  params: {
-    target: {
-      name: 'page',
-      binding: 'send_to_host',
-      runtime: true,
-    },
-    expression: 'send_to_host("hello")',
-  },
-})
-
-const target = cdp.browsers.get('main').targets.get('page')
-console.log(target.options.binding) // 'send_to_host'
-// For an explicit page session, use page.options.binding.
-```
-
-`Runtime.bindingCalled` reports the same name in its `name` field. Configuration
-is applied during target initialization and reused on reconnect or recreation;
-changing the stored field alone does not rename a binding in a running page.
-
-## Events and lifetime
-
-```js
-cdp.addEventListener('notify', event => console.log(event.detail))
-cdp.addEventListener('Network.requestWillBeSent', event => {
-  console.log(event.detail.browser, event.detail.target, event.detail.request.url)
-})
-```
-
-Events are delivered directly, with no subscriptions, buffering, polling or
-filtering layer. For manager `notify` events, routing labels are in
-`event.detail.params`; for method events, in `event.detail`. Enable domains as
-needed, e.g. `Runtime.enable` for console and binding notifications. Browser and
-page event listeners receive raw CDP messages. `close`, `setup_error` and
-`request_error` report lifecycle and asynchronous setup/transport failures.
-
-Browser, target and session maps live only in memory. There is no SQLite or
-catalog persistence. The ordinary browser profile persists on disk.
-`CDP.close()` shuts down processes it launched and only disconnects externally
-attached browsers; the manager cannot be reused afterward. `browser.close()`
-only closes its WebSocket; use the native `Browser.close` command to terminate
-a browser through the explicit API.
-
-This library has no batch API, image helpers/post-processing, event filters,
-MCP server or database. Native CDP methods remain available as protocol calls.
+`client.close()` closes the processes it launched and disconnects external
+browsers. `socket.close()` only closes that socket.
 
 ## Verification
 
-Run `node --check cdp.js` and `node --test tests/cdp.test.js`. There is no
-`package.json`, dependency installation or import from `x.js`.
-Tests use Node's test runner and a local
-headless Chromium browser, covering session routing, concurrent requests,
-custom methods, direct events, reconnect, profile isolation, attachment,
-timeouts and shutdown. Test profiles are disposable under `build/tests/`.
+Run `node --check cdp.js` and `node --test tests/cdp.test.js`.
+Tests use local headless Chromium and disposable profiles under `build/tests/`.
+No batch API, image processing, event filters or database are included.
+Unused reference utilities live in `extra/`.
 
 Protocol reference: [Chrome DevTools Protocol](https://chromedevtools.github.io/devtools-protocol/).

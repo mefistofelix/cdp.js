@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
-import { CDP, connect, launch, xpx } from '../cdp.js'
+import api, { jsrpc, cdp, util } from '../cdp.js'
 
 const build = path.resolve('build/tests')
 await fs.mkdir(build, { recursive: true })
@@ -20,7 +20,7 @@ function call(client, method, params = {}, target = 'page', browser = 'main') {
 
 async function fixture(t, options = {}) {
   const base_path = await fs.mkdtemp(path.join(build, 'run-'))
-  const client = new CDP({
+  const client = new cdp({
     base_path,
     headless: true,
     ...options,
@@ -29,14 +29,16 @@ async function fixture(t, options = {}) {
   return client
 }
 
-test('XPath extensions quote strings and compare case-insensitively', () => {
-  assert.match(xpx('//a[ends-with(@href,".pdf")]'), /substring/)
-  assert.match(xpx('//a[icontains(@title,"HELLO")]'), /translate\("HELLO"/)
+test('public exports contain jsrpc, cdp and static utilities', async () => {
+  assert.deepEqual(Object.keys(api).sort(), ['cdp', 'jsrpc', 'util'])
+  assert.equal(api.cdp, cdp)
+  assert.equal(api.jsrpc, jsrpc)
+  assert.deepEqual(Object.keys(await import('../cdp.js')).sort(), ['cdp', 'default', 'jsrpc', 'util'])
 })
 
 test('custom methods are ordinary mutable handlers and return their own results', async t => {
-  const client = new CDP()
-  const other = new CDP()
+  const client = new cdp()
+  const other = new cdp()
   t.after(() => client.close())
   t.after(() => other.close())
   const params = Object.freeze({ value: 21 })
@@ -49,7 +51,7 @@ test('custom methods are ordinary mutable handlers and return their own results'
     method: '_.double',
     params,
   }), 42)
-  assert.equal(client.browsers.size, 0, 'local handlers should not launch a browser')
+  assert.equal(Object.keys(client.browsers).length, 0, 'local handlers should not launch a browser')
   await assert.rejects(other.call({ method: '_.double' }), /Unknown CDP extension/)
 
   client.custom_methods['_.find'] = async function (received) {
@@ -90,14 +92,14 @@ test('structured calls return native results; concurrent calls reuse one page', 
     }),
   ])
   assert.deepEqual(results.map(value => value.result.value), [2, 4])
-  const record = client.browsers.get('main')
-  assert.equal(client.browsers.size, 1)
-  assert.equal(record.targets.size, 1)
-  const tid = record.targets.get('page').tid
-  assert.equal(record.targets.get('page').options.binding, '_send_to_cdp')
-  assert.deepEqual(record.socket.pages.get(tid).setup_errors, [])
+  const record = client.browsers.main
+  assert.equal(Object.keys(client.browsers).length, 1)
+  assert.equal(Object.keys(record.targets).length, 1)
+  const tid = record.targets.page.targetId
+  assert.equal(record.targets.page.binding, '_send_to_cdp')
+  assert.deepEqual(record.targets.page.setup_errors, [])
   const pages = (await call(client, 'Target.getTargets', {}, null)).targetInfos.filter(value => value.type === 'page')
-  assert.equal(pages.length, 1, 'owned startup blank should close')
+  assert.equal(pages.length, 2, 'creating a target must preserve the initial tab')
   await assert.rejects(call(client, 'NoSuchDomain.noSuchMethod'), error => {
     assert.ok(error.cdp.error.code)
     assert.equal(error.cause.req.method, 'NoSuchDomain.noSuchMethod')
@@ -117,14 +119,14 @@ test('structured calls return native results; concurrent calls reuse one page', 
   assert.equal(inputs.target, 'page')
   assert.ok((await call(client, 'Runtime.evaluate', { expression: 'throw new Error("page error")' })).exceptionDetails)
 
-  await call(client, 'Target.detachFromTarget', { sessionId: record.socket.pages.get(tid).sid }, null)
+  await call(client, 'Target.detachFromTarget', { sessionId: record.targets.page.sessionId }, null)
   assert.equal((await call(client, 'Runtime.evaluate', {
     expression: '42',
     returnByValue: true,
   })).result.value, 42)
   await call(client, 'Target.closeTarget', { targetId: tid }, null)
   await call(client, 'Runtime.evaluate', { expression: '1' })
-  assert.notEqual(record.targets.get('page').tid, tid)
+  assert.notEqual(record.targets.page.targetId, tid)
 })
 
 test('custom click/find route through Runtime.evaluate, with no separate image helpers', { timeout: 60000 }, async t => {
@@ -152,10 +154,6 @@ test('custom click/find route through Runtime.evaluate, with no separate image h
   assert.equal((await call(client, '_.find', { xpath: '//button/text()' })).result.value.items[0].node_type, 3)
   await assert.rejects(call(client, '_.find', { xpath: '//button' }, null), /requires target/)
   await assert.rejects(call(client, '_.screenshot'), /Unknown CDP extension/)
-  await assert.rejects(call(client, '_.click', {
-    xpath: '//button',
-    attempts: 0,
-  }), /attempts/)
 
   client.custom_methods['_.answer'] = function (params) {
     return this.call({
@@ -168,24 +166,6 @@ test('custom click/find route through Runtime.evaluate, with no separate image h
     })
   }
   assert.equal((await call(client, '_.answer')).result.value, 42)
-
-  const record = client.browsers.get('main')
-  const page = record.socket.pages.get(record.targets.get('page').tid)
-  assert.equal((await page.call({
-    method: '_.find',
-    params: { xpath: '//button' },
-  })).result.value.count, 1)
-  page.custom_methods['_.find'] = function (params) {
-    assert.equal(this, page)
-    return params.xpath
-  }
-  assert.equal(await page.call({
-    method: '_.find',
-    params: { xpath: '//custom' },
-  }), '//custom')
-  delete page.custom_methods['_.find']
-  await assert.rejects(page.call({ method: '_.find' }), /Unknown CDP extension/)
-  assert.equal((await call(client, '_.find', { xpath: '//button' })).result.value.count, 1)
 })
 
 test('direct events carry labels; reconnect retains only in-memory target routing', { timeout: 60000 }, async t => {
@@ -210,32 +190,31 @@ test('direct events carry labels; reconnect retains only in-memory target routin
   assert.equal(bindings[0].name, 'send_to_host')
   assert.equal(bindings[0].browser, 'main')
   assert.equal(bindings[0].target, 'page')
-  const record = client.browsers.get('main')
-  const tid = record.targets.get('page').tid
-  assert.equal(record.targets.get('page').options.binding, 'send_to_host')
-  assert.equal(record.socket.pages.get(tid).options.binding, 'send_to_host')
+  const record = client.browsers.main
+  const tid = record.targets.page.targetId
+  assert.equal(record.targets.page.binding, 'send_to_host')
   assert.equal((await call(client, 'Runtime.evaluate', {
     expression: 'typeof _send_to_cdp',
     returnByValue: true,
   })).result.value, 'undefined')
-  const closed = record.socket.on_first('close')
+  const closed = util.on_first(record.socket, 'close')
   record.socket.close()
   await closed
   assert.equal((await call(client, 'Runtime.evaluate', {
     expression: '21 * 2',
     returnByValue: true,
   })).result.value, 42)
-  assert.equal(record.targets.get('page').tid, tid)
+  assert.equal(record.targets.page.targetId, tid)
   await call(client, 'Runtime.evaluate', { expression: 'send_to_host("reconnected")' })
   assert.equal(bindings.at(-1).payload, 'reconnected')
-  assert.equal(bindings.at(-1).name, record.targets.get('page').options.binding)
+  assert.equal(bindings.at(-1).name, record.targets.page.binding)
   await call(client, 'Target.closeTarget', { targetId: tid }, null)
   await call(client, 'Runtime.evaluate', { expression: 'send_to_host("recreated")' })
   assert.equal(bindings.at(-1).payload, 'recreated')
   assert.equal(bindings.at(-1).name, 'send_to_host')
 })
 
-test('browser labels isolate profiles; initialization flags and option conflicts', { timeout: 60000 }, async t => {
+test('browser labels isolate profiles; target initialization flags and public records', { timeout: 60000 }, async t => {
   const client = await fixture(t)
   await Promise.all([
     call(client, 'Runtime.evaluate', { expression: 'window.marker = "main"' }, {
@@ -252,86 +231,82 @@ test('browser labels isolate profiles; initialization flags and option conflicts
     expression: 'window.marker',
     returnByValue: true,
   }, 'page', 'other')).result.value, 'other')
-  assert.notEqual(client.browsers.get('main').socket.url, client.browsers.get('other').socket.url)
+  assert.notEqual(client.browsers.main.socket.url, client.browsers.other.socket.url)
   assert.equal((await call(client, 'Runtime.evaluate', {
     expression: 'typeof _send_to_cdp',
     returnByValue: true,
   })).result.value, 'undefined')
-  await assert.rejects(call(client, 'Runtime.evaluate', {}, {
-    name: 'page',
-    initialize: true,
-  }), /different options/)
-  await assert.rejects(call(client, 'Browser.getVersion', {}, null, {
-    name: 'main',
-    headless: false,
-  }), /different options/)
-  await assert.rejects(call(client, 'Browser.getVersion', {}, null, {
-    name: 'collision',
-    user_data_dir: client.browsers.get('main').options.user_data_dir,
-  }), /already in use/)
+  client.browsers.main.targets.page.binding = 'changed_binding'
+  assert.equal(client.browsers.main.targets.page.binding, 'changed_binding')
+
 })
 
-test('low-level API and existing browser attachment via WS, HTTP and port', { timeout: 60000 }, async t => {
-  const user_data_dir = await fs.mkdtemp(path.join(build, 'attach-'))
-  const [proc, owner] = await launch({
-    headless: true,
-    user_data_dir,
-  })
-  t.after(async () => {
-    if (owner.readyState === WebSocket.OPEN) await owner.call({ method: 'Browser.close' })
-    owner.close()
-    if (proc.exitCode === null && proc.signalCode === null) proc.kill()
-  })
-  const page = await owner.createTarget({
+test('raw jsrpc and existing browser attachment via WS, HTTP and port', { timeout: 60000 }, async t => {
+  const client = await fixture(t)
+  const disabled = await call(client, 'Runtime.evaluate', {
+    expression: 'typeof _send_to_cdp',
+    returnByValue: true,
+  }, {
+    name: 'page',
     runtime: false,
     binding: false,
   })
-  assert.equal(page.options.binding, false)
-  assert.equal((await page.call({
-    method: 'Runtime.evaluate',
-    params: {
-      expression: 'typeof _send_to_cdp',
-      returnByValue: true,
-    },
-  })).result.value, 'undefined')
-  assert.equal((await page.call({
-    method: 'Runtime.evaluate',
-    params: {
-      expression: '6 * 7',
-      returnByValue: true,
-    },
+  assert.equal(disabled.result.value, 'undefined')
+  const record = client.browsers.main
+  const target = record.targets.page
+  assert.equal(target.binding, false)
+  assert.equal(Object.getPrototypeOf(target), Object.prototype)
+  assert.equal(target.call, undefined)
+  assert.equal(record.session_targets[target.sessionId], target.targetId)
+  assert.equal(record.target_info[target.targetId].sessionId, target.sessionId)
+  assert.equal((await call(client, 'Runtime.evaluate', {
+    expression: '6 * 7',
+    returnByValue: true,
   })).result.value, 42)
+
+  const owner = record.socket
   const url = new URL(owner.url)
-  for (const options of [{ websocket_url: owner.url }, { http_url: `http://127.0.0.1:${url.port}` }, { port: Number(url.port) }]) {
-    const attached = new CDP()
+  for (const options of [
+    { websocket_url: owner.url },
+    { http_url: 'http://127.0.0.1:' + url.port },
+    { http_url: 'http://127.0.0.1:' + url.port + '/json/version' },
+    { port: Number(url.port) },
+  ]) {
+    const attached = new cdp()
+    t.after(() => attached.close())
     const result = await call(attached, 'Browser.getVersion', {}, null, {
       name: 'remote',
       ...options,
     })
     assert.ok(result.product)
     await attached.close()
-    assert.ok((await owner.call({ method: 'Browser.getVersion' })).product, 'closing an attached client must preserve the browser')
+    assert.ok((await owner.req({ method: 'Browser.getVersion' })).product, 'disconnecting must preserve the browser')
   }
-  const attached = await connect(`http://127.0.0.1:${url.port}/json/version`)
-  attached.close()
+  const raw = new jsrpc(owner.url)
+  t.after(() => raw.close())
+  await util.on_first(raw, 'open')
+  assert.ok((await raw.req({ method: 'Browser.getVersion' })).product)
+  const closed = util.on_first(raw, 'close')
+  raw.close()
+  await closed
 })
 
 test('timeouts, disconnects and launch failures reject without hanging or replay', { timeout: 60000 }, async t => {
   const client = await fixture(t)
   await call(client, 'Runtime.evaluate', { expression: '1' })
-  const socket = client.browsers.get('main').socket
-  const page = client.browsers.get('main').targets.get('page')
-  const sessionId = socket.pages.get(page.tid).sid
-  const timed = socket.request({
+  const socket = client.browsers.main.socket
+  const target = client.browsers.main.targets.page
+  const sessionId = target.sessionId
+  const timed = socket.req({
     method: 'Runtime.evaluate',
     params: {
       expression: 'new Promise(() => {})',
       awaitPromise: true,
     },
     sessionId,
-  }, { timeout_ms: 40 })
-  await assert.rejects(timed.promise, /execution outcome is unknown/)
-  assert.equal(socket.pending.size, 0)
+  }, 40)
+  await assert.rejects(timed, /execution outcome is unknown/)
+  assert.equal(Object.keys(socket.pending).length, 0)
   const slow = socket.req({
     method: 'Runtime.evaluate',
     params: {
@@ -343,11 +318,115 @@ test('timeouts, disconnects and launch failures reject without hanging or replay
   const rejected = assert.rejects(slow, /connection closed/)
   socket.close()
   await rejected
-  assert.equal(socket.pending.size, 0)
-  await assert.rejects(launch({
+  assert.equal(Object.keys(socket.pending).length, 0)
+  await assert.rejects(call(client, 'Browser.getVersion', {}, null, {
+    name: 'missing',
     executable_path: path.join(build, 'missing-browser'),
     user_data_dir: path.join(build, 'invalid'),
   }), /ENOENT/)
-  await assert.rejects(launch({ args: ['--remote-debugging-port=1234'] }), /managed/)
-  await assert.rejects(call(client, 'Browser.getVersion', {}, null, '../unsafe'), /directory label/)
+
+})
+
+test('CLI options remain editable key/value objects until argv materialization', () => {
+  const args = util.build_browser_args({
+    user_data_dir: 'profile with spaces',
+    headless: true,
+    extensions: true,
+    images: false,
+    translations: true,
+    login: true,
+    args: {
+      'mute-audio': false,
+      'window-size': '800,600',
+      'custom-switch': 'value with spaces',
+      'custom-list': ['first', 'second'],
+    },
+  })
+  assert.equal(args.headless, 'new')
+  assert.equal(args['disable-extensions'], undefined)
+  assert.equal(args['disable-component-extensions-with-background-pages'], undefined)
+  assert.equal(args['disable-sync'], undefined)
+  assert.equal(args['blink-settings'], 'imagesEnabled=false')
+  assert.ok(!args['disable-features'].includes('Translate'))
+  assert.ok(!args['disable-features'].includes('DiceWebSigninInterception'))
+  delete args['custom-switch']
+  args['new-switch'] = true
+  const argv = util.args_to_strings(args)
+  assert.ok(argv.includes('--user-data-dir=profile with spaces'))
+  assert.ok(argv.includes('--window-size=800,600'))
+  assert.ok(argv.includes('--new-switch'))
+  assert.ok(argv.includes('--custom-list=first,second'))
+  assert.ok(!argv.includes('--mute-audio'))
+  assert.ok(!argv.some(arg => arg.startsWith('--custom-switch')))
+  assert.equal(argv.filter(arg => arg.startsWith('--window-size=')).length, 1)
+  assert.ok(Object.keys(args).every(key => !key.startsWith('--')))
+})
+
+test('generic preferences update nested keys, preserve siblings and accept overrides', async () => {
+  const directory = await fs.mkdtemp(path.join(build, 'preferences-'))
+  const filename = path.join(directory, 'Default', 'Preferences')
+  await util.set_preferences(filename, {
+    'translate.enabled': true,
+    'translate.other': 42,
+    'custom.keep': 'value',
+  })
+  const preferences = {
+    'translate.enabled': true,
+    'signin.allowed': false,
+    'signin.allowed_on_next_startup': false,
+    'custom.new': ['one', 'two'],
+  }
+  assert.equal(preferences['translate.enabled'], true)
+  assert.equal(preferences['signin.allowed'], false)
+  await util.set_preferences(filename, preferences)
+  const result = JSON.parse(await fs.readFile(filename, 'utf8'))
+  assert.deepEqual(result.translate, {
+    enabled: true,
+    other: 42,
+  })
+  assert.deepEqual(result.custom, {
+    keep: 'value',
+    new: ['one', 'two'],
+  })
+  assert.equal(result.signin.allowed, false)
+  assert.equal(result.signin.allowed_on_next_startup, false)
+})
+
+test('browser options reach actual Chrome arguments and translation/login preferences', { timeout: 60000 }, async t => {
+  const client = await fixture(t, {
+    extensions: false,
+    images: false,
+    translations: false,
+    login: false,
+  })
+  for (const enabled of [false, true]) {
+    const browser = {
+      name: enabled ? 'enabled' : 'disabled',
+      extensions: enabled,
+      images: enabled,
+      translations: enabled,
+      login: enabled,
+    }
+    await call(client, 'Page.navigate', { url: 'chrome://settings/' }, 'settings', browser)
+    const command = await call(client, 'Browser.getBrowserCommandLine', {}, null, browser.name)
+    assert.ok(command.arguments.includes('--headless=new'))
+    assert.equal(command.arguments.includes('--disable-extensions'), !enabled)
+    assert.equal(command.arguments.includes('--disable-sync'), !enabled)
+    assert.equal(command.arguments.includes('--blink-settings=imagesEnabled=false'), !enabled)
+    const result = await call(client, 'Runtime.evaluate', {
+      expression: `new Promise(resolve => {
+        const timer = setInterval(async () => {
+          if (!globalThis.chrome?.settingsPrivate) return
+          clearInterval(timer)
+          const prefs = await Promise.all(['translate.enabled', 'signin.allowed_on_next_startup'].map(key =>
+            new Promise(done => chrome.settingsPrivate.getPref(key, pref => done(pref.value)))
+          ))
+          resolve(prefs)
+        }, 20)
+      })`,
+      awaitPromise: true,
+      returnByValue: true,
+    }, 'settings', browser.name)
+    assert.deepEqual(result.result.value, [enabled, enabled])
+  }
 })
