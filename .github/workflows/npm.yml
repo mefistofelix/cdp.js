@@ -1,0 +1,28 @@
+name: npm
+
+on:
+  # push:
+  #   tags:
+  #     - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: |
+          git init
+          git remote add origin "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+          authorization="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git -c http.extraheader="AUTHORIZATION: basic $authorization" fetch origin --depth=1 "$GITHUB_SHA"
+          git checkout "$GITHUB_SHA"
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - run: |
+          node npm/prepare.mjs
+          npx --yes npm@11.20.0 pack ./build/npm --dry-run
+          npx --yes npm@11.20.0 publish ./build/npm --access public

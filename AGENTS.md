@@ -12,6 +12,11 @@ Apply the user's current instructions to the task at hand.
 | `cdp.js` | Complete maintained implementation, an ES module importing only Node.js built-ins. |
 | `tests/cdp.test.js` | Node test-runner coverage with real headless Chromium. |
 | `tests/chat-monitoring.md` | Manual application traffic inspection and tool-session extraction recipe. |
+| `npm/package.json` | Publication metadata and version; no root package manifest. |
+| `npm/prepare.mjs` | Copy the three publishable files into disposable `build/npm`. |
+| `npm/PUBLISHING.md` | Initial npm login/publication and trusted publisher setup. |
+| `.github/workflows/npm.yml` | Manual OIDC npm publication, with an optional commented tag trigger. |
+| `build.bat` | Windows portable-tool setup and npm archive preparation. |
 | `README.md` | User-facing API, defaults, argument/option semantics and examples. |
 | `DEV_PREF.md` | Shared engineering and Git preferences; read first. |
 | `AGENTS.md` | Project-specific maintenance guidance. |
@@ -19,8 +24,9 @@ Apply the user's current instructions to the task at hand.
 | `build/` | Ignored disposable output; tests put profiles in `build/tests/`. |
 | `.gitignore` | Inverted allowlist of maintained files/directories. |
 
-Use Node.js 22.19+ and an installed Chromium-family browser. There is no package
-install, compilation step, package manifest or third-party runtime dependency.
+Use Node.js 22.19+ and an installed Chromium-family browser. Direct library use
+needs no package install or compilation. There is no root package manifest or
+third-party runtime dependency; `npm/package.json` exists only for publication.
 Use `.mjs` for standalone examples and `CDP_BROWSER` to select a test executable.
 
 Keep the implementation in the root file. Generic examples in DEV_PREF mentioning
@@ -153,8 +159,8 @@ on success, timeout and disconnect.
 
 ## Scope and simplification
 
-Keep the library low-level and self-contained. Do not add `package.json`, reference
-utility dependencies, SQLite persistence, batch methods, image helpers, event
+Keep the library low-level and self-contained. Do not add a root `package.json`,
+reference utility dependencies, SQLite persistence, batch methods, image helpers, event
 filtering/buffering/polling, or a Page abstraction. Native CDP pass-through remains
 available; these exclusions concern library-level features. Do not introduce
 references to unrelated projects in the maintained API/docs.
@@ -210,6 +216,12 @@ changes. Keep `.gitignore` inverted; allowlist maintained root files explicitly.
 Keep `extra/`, generated profiles and caches ignored. Do not re-add local reference
 files to Git without an explicit request. Update README for public behavior and
 this file for architecture/maintenance constraints.
+
+Keep npm metadata in `npm/` and stage publication in `build/npm`. The tarball must
+contain only `package.json`, `cdp.js`, and `README.md`; source bytes and exports
+must match direct-file use. Follow `npm/PUBLISHING.md` for authentication and
+release steps. Packaging must not change repository visibility, add a license
+without a user decision, or include profiles, tests, private data, or tools.
 
 Follow [DEV_PREF.md](DEV_PREF.md)'s commit-and-push workflow for meaningful completed
 steps when a remote exists. Review the diff and stage only intended files. Report

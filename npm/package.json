@@ -1,0 +1,32 @@
+{
+  "name": "@mefistofelix/cdp.js",
+  "version": "0.1.0",
+  "description": "Low-level Chromium DevTools Protocol client for Node.js, with no runtime dependencies.",
+  "type": "module",
+  "exports": "./cdp.js",
+  "files": [
+    "cdp.js"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "keywords": [
+    "cdp",
+    "chrome",
+    "chromium",
+    "devtools",
+    "browser",
+    "automation"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mefistofelix/cdp.js.git"
+  },
+  "homepage": "https://github.com/mefistofelix/cdp.js#readme",
+  "bugs": {
+    "url": "https://github.com/mefistofelix/cdp.js/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

@@ -1,12 +1,25 @@
 # cdp.js
 
 A low-level Chromium DevTools Protocol library for Node.js. One ES module,
-standard-library imports, no npm packages or `package.json`.
+standard-library imports, no runtime dependencies or root `package.json`.
 
 Use Node.js 22.19+ and an installed Chrome, Chromium or Edge. Import `cdp.js`
 directly from an ES module, for example `example.mjs`, and run `node example.mjs`.
 Browser discovery covers common Windows, macOS and Linux installation paths;
 use `executable_path` or the `CDP_BROWSER` environment variable for other paths.
+
+For a published npm release:
+
+```sh
+npm install @mefistofelix/cdp.js
+```
+
+```js
+import api, { util, jsrpc, browser, cdp } from '@mefistofelix/cdp.js'
+```
+
+The npm package exports the same file and API. Direct file imports in the examples
+below remain supported. Publication metadata is isolated in `npm/`.
 
 ## Features and scope
 
@@ -808,11 +821,15 @@ the tracked source or runtime dependencies.
 workflow for detecting new conversations and extracting connector session handles
 from tool-call history. It is a caller-side recipe, not additional library API.
 
+For npm packaging, account setup, and GitHub publishing, see
+[Publishing](npm/PUBLISHING.md). `build.bat` prepares the package on Windows;
+`node npm/prepare.mjs` prepares its files on any supported Node platform.
+
 ```sh
 node --check cdp.js
 node --test tests/cdp.test.js
 ```
 
 Integration tests launch local headless Chromium with disposable profiles under
-`build/tests/`. Set `CDP_BROWSER` if discovery does not match the machine. No build
-or package installation is needed.
+`build/tests/`. Set `CDP_BROWSER` if discovery does not match the machine. Direct
+library use needs no build or package installation; npm packaging is optional.
