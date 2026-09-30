@@ -13,10 +13,8 @@ Apply the user's current instructions to the task at hand.
 | `tests/cdp.test.js` | Node test-runner coverage with real headless Chromium. |
 | `tests/chat-monitoring.md` | Manual application traffic inspection and tool-session extraction recipe. |
 | `npm/package.json` | Publication metadata and version; no root package manifest. |
-| `npm/prepare.mjs` | Copy the three publishable files into disposable `build/npm`. |
 | `npm/PUBLISHING.md` | Initial npm login/publication and trusted publisher setup. |
 | `.github/workflows/npm.yml` | Manual OIDC npm publication, with an optional commented tag trigger. |
-| `build.bat` | Windows portable-tool setup and npm archive preparation. |
 | `README.md` | User-facing API, defaults, argument/option semantics and examples. |
 | `DEV_PREF.md` | Shared engineering and Git preferences; read first. |
 | `AGENTS.md` | Project-specific maintenance guidance. |
@@ -217,7 +215,9 @@ Keep `extra/`, generated profiles and caches ignored. Do not re-add local refere
 files to Git without an explicit request. Update README for public behavior and
 this file for architecture/maintenance constraints.
 
-Keep npm metadata in `npm/` and stage publication in `build/npm`. The tarball must
+Keep npm metadata in `npm/`. Publishing copies `cdp.js` and `README.md` into that
+directory with one shell command; those copies stay ignored. No build or setup
+script is needed for this single-file library. The tarball must
 contain only `package.json`, `cdp.js`, and `README.md`; source bytes and exports
 must match direct-file use. Follow `npm/PUBLISHING.md` for authentication and
 release steps. Packaging must not change repository visibility, add a license

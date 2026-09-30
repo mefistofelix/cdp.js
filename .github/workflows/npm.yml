@@ -23,6 +23,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
       - run: |
-          node npm/prepare.mjs
-          npx --yes npm@11.20.0 pack ./build/npm --dry-run
-          npx --yes npm@11.20.0 publish ./build/npm --access public
+          cp cdp.js README.md npm/
+          npx --yes npm@11.20.0 publish ./npm --access public

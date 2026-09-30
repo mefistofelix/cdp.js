@@ -822,8 +822,8 @@ workflow for detecting new conversations and extracting connector session handle
 from tool-call history. It is a caller-side recipe, not additional library API.
 
 For npm packaging, account setup, and GitHub publishing, see
-[Publishing](npm/PUBLISHING.md). `build.bat` prepares the package on Windows;
-`node npm/prepare.mjs` prepares its files on any supported Node platform.
+[Publishing](npm/PUBLISHING.md). Publishing only copies `cdp.js` and this README
+into `npm/` alongside its manifest; no build script is needed.
 
 ```sh
 node --check cdp.js

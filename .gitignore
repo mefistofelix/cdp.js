@@ -4,13 +4,11 @@
 !/AGENTS.md
 !/cdp.js
 !/README.md
-!/build.bat
 !/tests/
 !/examples/
 !/npm/
 /npm/*
 !/npm/package.json
-!/npm/prepare.mjs
 !/npm/PUBLISHING.md
 !/.github/
 /.github/*
