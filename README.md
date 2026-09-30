@@ -199,7 +199,7 @@ local configuration.
 | `user_data_dir` | absolute path string, `<base_path>/<name>` | Chromium user-data directory containing profiles such as `Default`. The generated default is absolute; explicit overrides should be absolute too. |
 | `executable_path` | string, automatic discovery | Executable to spawn; takes precedence over `CDP_BROWSER`. |
 | `headless` | boolean, `false` | When true, add `headless: 'new'` and default `window-size: '1440,900'`. |
-| `windowsHide` | boolean, `true` | Hide the spawned process's console on Windows. Passed to Node's `spawn`, independently of `headless`; does not hide the parent terminal. |
+| `windowsHide` | boolean, effective headless mode | Hide the spawned process's console on Windows. Defaults to true when the final arguments include `--headless`, false otherwise; an explicit value wins. Does not hide the parent terminal. |
 | `extensions` | boolean, `false` | When true, omit the two extension-disabling switches; does not install extensions. |
 | `images` | boolean, `true` | When false, request `blink-settings: 'imagesEnabled=false'`; controls loading, not image processing. |
 | `translations` | boolean, `false` | Set translation preferences and, unless true, disable translation feature IDs. |
@@ -460,6 +460,8 @@ writes with a running browser, which may overwrite the file itself.
 | --- | --- |
 | `headless: true` plus `args.headless: false` | Omit `--headless`; the generated window-size argument remains unless also overridden. |
 | `headless: false` plus `args.headless: 'new'` | Send `--headless=new`; no automatic headless window-size default was generated. |
+| `windowsHide` omitted plus a raw `args.headless` override | Follow the effective `--headless` switch after the override. |
+| Explicit `windowsHide: true` or `false` | Pass that value to Node's `spawn`, regardless of headless mode. |
 | `extensions: true` plus `args['disable-extensions']: true` | The raw extension-disabling switch still wins. |
 | `extensions: false` plus only `args['disable-extensions']: false` | Remove that flag, but retain `disable-component-extensions-with-background-pages`. Use `extensions: true` to omit both generated flags. |
 | `images: false` plus an overridden `blink-settings` | Replace the whole string; image disabling is not appended to the caller's value. |

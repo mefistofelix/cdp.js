@@ -159,7 +159,8 @@ on success, timeout and disconnect.
 - `browser.launch` returns `{ proc, url }` and opens no CDP socket. Track owned
   processes separately from attachments. Closing a manager preserves external
   browsers and profile directories. The browser option `windowsHide` defaults to
-  true and is passed to `spawn`, independently of the `headless` CLI setting.
+  whether the final arguments include `--headless`, including raw overrides.
+  An explicit value takes precedence and is passed to `spawn`.
 - Browser/target/session mappings remain in memory. Profile preference files do
   not authorize adding persistence for those mappings.
 

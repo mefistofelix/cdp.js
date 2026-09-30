@@ -209,7 +209,7 @@ export class browser {
       ...options.preferences,
     })
     const proc = child_process.spawn(options.executable_path || browser.find_executable_path(), [...util.args_to_strings(args), 'about:blank'], {
-      windowsHide: options.windowsHide ?? true,
+      windowsHide: options.windowsHide ?? (args.headless != null && args.headless !== false),
       stdio: ['ignore', 'ignore', 'pipe'],
     })
     let diagnostic = ''

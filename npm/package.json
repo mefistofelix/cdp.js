@@ -1,6 +1,6 @@
 {
   "name": "@mefistofelix/cdp.js",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Low-level Chromium DevTools Protocol client for Node.js, with no runtime dependencies.",
   "type": "module",
   "exports": "./cdp.js",
