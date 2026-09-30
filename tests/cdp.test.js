@@ -220,6 +220,12 @@ test('direct events carry labels; reconnect retains only in-memory target routin
   await call(client, 'Runtime.evaluate', { expression: 'send_to_host("reconnected")' })
   assert.equal(bindings.at(-1).payload, 'reconnected')
   assert.equal(bindings.at(-1).name, record.targets.page.binding)
+  const sessionId = record.targets.page.sessionId
+  record.socket.close()
+  await call(client, 'Runtime.evaluate', { expression: 'send_to_host("immediate reconnect")' })
+  assert.equal(bindings.at(-1).payload, 'immediate reconnect')
+  assert.equal(record.targets.page.targetId, tid)
+  assert.notEqual(record.targets.page.sessionId, sessionId)
   await call(client, 'Target.closeTarget', { targetId: tid }, null)
   await call(client, 'Runtime.evaluate', { expression: 'send_to_host("recreated")' })
   assert.equal(bindings.at(-1).payload, 'recreated')

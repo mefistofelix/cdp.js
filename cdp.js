@@ -321,31 +321,31 @@ export class cdp extends EventTarget {
   }
 
   _notify(browser, message) {
-    const params = message.params || {}
+    const params = {
+      ...message.params,
+      browser: browser.name,
+    }
     const sessionId = params.sessionId || message.sessionId
     const targetId = params.targetInfo?.targetId || params.targetId || browser.session_targets[sessionId]
     const target = Object.values(browser.targets).find(value => value.targetId === targetId)
     if (params.targetInfo) {
       Object.assign(browser.target_info[targetId] ??= {}, params.targetInfo)
     }
+    const info = browser.target_info[targetId]
     if (message.method === 'Target.attachedToTarget') {
-      this._detach(browser, browser.target_info[targetId]?.sessionId)
-      browser.target_info[targetId].sessionId = sessionId
+      this._detach(browser, info?.sessionId)
+      info.sessionId = sessionId
       browser.session_targets[sessionId] = targetId
     }
-    const routed = {
-      ...params,
-      browser: browser.name,
-      ...(target ? { target: target.name } : {}),
-    }
+    if (target) params.target = target.name
     util.emit(this, 'notify', {
       ...message,
-      params: routed,
+      params,
     })
-    util.emit(this, message.method, routed)
+    util.emit(this, message.method, params)
     if (message.method === 'Target.detachedFromTarget') this._detach(browser, sessionId)
     if (['Target.targetDestroyed', 'Target.targetCrashed'].includes(message.method)) {
-      this._detach(browser, browser.target_info[targetId]?.sessionId)
+      this._detach(browser, info?.sessionId)
       delete browser.target_info[targetId]
     }
   }
@@ -370,6 +370,7 @@ export class cdp extends EventTarget {
     const socket = record.socket = new jsrpc(url, record)
     record.target_info = {}
     record.session_targets = {}
+    for (const target of Object.values(record.targets)) target.sessionId = null
     socket.addEventListener('notify', event => this._notify(record, event.detail))
     socket.addEventListener('close', event => {
       if (record.socket !== socket) return
@@ -379,8 +380,7 @@ export class cdp extends EventTarget {
         code: event.code,
       })
     })
-    const event = await util.on_first(socket, 'open error close', record.connect_timeout_ms ?? 15000)
-    if (event.type !== 'open') throw new Error('Unable to open CDP WebSocket')
+    await util.on_first(socket, 'open error close', record.connect_timeout_ms ?? 15000)
     await socket.req({
       method: 'Target.setAutoAttach',
       params: {
@@ -397,7 +397,7 @@ export class cdp extends EventTarget {
 
   async _target(browser, target) {
     const socket = browser.socket
-    if (!Object.hasOwn(browser.target_info, target.targetId)) {
+    if (!browser.target_info[target.targetId]) {
       target.targetId = (await socket.req({
         method: 'Target.createTarget',
         params: {
@@ -407,24 +407,28 @@ export class cdp extends EventTarget {
         },
       })).targetId
     }
-    let sessionId = browser.target_info[target.targetId]?.sessionId
-    if (!sessionId) {
-      sessionId = (await socket.req({
+    const info = browser.target_info[target.targetId] ??= {}
+    if (!info.sessionId) {
+      info.sessionId = (await socket.req({
         method: 'Target.attachToTarget',
         params: {
           targetId: target.targetId,
           flatten: true,
         },
       })).sessionId
-      browser.target_info[target.targetId].sessionId = sessionId
-      browser.session_targets[sessionId] = target.targetId
+      browser.session_targets[info.sessionId] = target.targetId
     }
+    const sessionId = info.sessionId
     const steps = []
     if (target.initialize !== false) {
-      if (target.runtime !== false) steps.push(['Runtime.enable'])
-      if (target.page !== false) steps.push(['Page.enable'])
-      if (target.network !== false) steps.push(['Network.enable'])
-      if (target.service_worker !== false) steps.push(['ServiceWorker.enable'])
+      for (const [option, domain] of Object.entries({
+        runtime: 'Runtime',
+        page: 'Page',
+        network: 'Network',
+        service_worker: 'ServiceWorker',
+      })) {
+        if (target[option] !== false) steps.push([domain + '.enable'])
+      }
       if (target.focus_emulation !== false) steps.push(['Emulation.setFocusEmulationEnabled', { enabled: true }])
       if (target.binding) steps.push(['Runtime.addBinding', { name: target.binding }])
       if (target.background_service !== false) steps.push(
@@ -476,17 +480,6 @@ export class cdp extends EventTarget {
       },
       targets: Object.create(null),
     }
-    let entry
-    if (target != null) {
-      const spec = typeof target === 'string' ? { name: target } : target
-      entry = record.targets[spec.name] ??= {
-        targetId: null,
-        sessionId: null,
-        binding: '_send_to_cdp',
-        ...spec,
-      }
-      if (entry.binding === true) entry.binding = '_send_to_cdp'
-    }
     if (!record.connecting && record.socket?.readyState !== WebSocket.OPEN) {
       record.connecting = this._connect(record).catch(error => {
         record.socket?.close()
@@ -497,16 +490,27 @@ export class cdp extends EventTarget {
       })
     }
     await record.connecting
-    if (entry && !entry.sessionId) {
-      entry.connecting ??= this._target(record, entry).finally(() => {
-        entry.connecting = null
-      })
-      await entry.connecting
+    let entry
+    if (target != null) {
+      const spec = typeof target === 'string' ? { name: target } : target
+      entry = record.targets[spec.name] ??= {
+        targetId: null,
+        sessionId: null,
+        binding: '_send_to_cdp',
+        ...spec,
+      }
+      if (entry.binding === true) entry.binding = '_send_to_cdp'
+      if (!entry.sessionId) {
+        entry.connecting ??= this._target(record, entry).finally(() => {
+          entry.connecting = null
+        })
+        await entry.connecting
+      }
     }
     const result = await record.socket.req({
       method,
       params: native,
-      ...(entry ? { sessionId: entry.sessionId } : {}),
+      sessionId: entry?.sessionId,
     })
     if (method === 'Target.detachFromTarget') this._detach(record, native.sessionId)
     if (method === 'Target.closeTarget' && result.success) {
