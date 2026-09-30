@@ -1,0 +1,14 @@
+/*
+!/.gitignore
+!/DEV_PREF.md
+!/cdp.js
+!/x.js
+!/package.json
+!/README.md
+!/build.bat
+!/extra/
+/extra/*
+!/extra/*.js
+!/extra/*.py
+!/tests/
+!/examples/
