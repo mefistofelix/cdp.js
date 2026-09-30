@@ -57,6 +57,37 @@ Both require a page target and translate to `Runtime.evaluate`. XPath accepts
 the original `ends-with()` and `icontains()` rewrites, with ASCII case folding on
 both `icontains()` operands. These simple rewrites are not a full XPath 2 parser.
 
+`cdp.custom_methods` and `page.custom_methods` are ordinary public objects keyed
+by the full method name. Assign, replace or delete entries directly:
+
+```js
+cdp.custom_methods['_.title'] = function (params) {
+  return this.call({
+    method: 'Runtime.evaluate',
+    params: {
+      ...params,
+      expression: 'document.title',
+      returnByValue: true,
+    },
+  })
+
+cdp.custom_methods['_.find'] = async function (params) {
+  return { xpath: params.xpath }
+}
+
+delete cdp.custom_methods['_.click']
+```
+
+Handlers receive the original `params` and have `this` bound to the caller
+(`CDP` or page). Their return value or promise becomes the call result; thrown
+errors propagate unchanged. Custom handlers can run local code or call native
+CDP methods, and do not need a target unless their own implementation requires
+one. Dispatch happens before browser launch or page creation.
+
+Each instance starts with its own shallow copy of the exported `custom_methods`
+object containing `_.click` and `_.find`. The object can also be replaced
+entirely. Changing the exported defaults affects subsequently created instances.
+
 ## Explicit browser/page API
 
 The lower-level API exposes browser and page sessions directly, with the same
@@ -101,7 +132,8 @@ URL or exact `/json/version` URL. `attachTarget(targetId, options)` attaches to 
 existing page. `wscdp` and `wsjrpc` remain available for raw session requests.
 `wsjrpc.req({method, params, sessionId})` returns the protocol result.
 
-The default export retains `launch`, `connect`, `wscdp`, `wsjrpc`, and `CDP`.
+The default export retains `launch`, `connect`, `wscdp`, `wsjrpc`, `CDP`, and
+`custom_methods`.
 `launch(profile, executable)` still returns `[process, browser]`. Migrate old
 `call(method, params)` to `call({method, params})`, and `page.click()` to
 `page.call({method:'_.click', params:{xpath:...}})`.
@@ -138,13 +170,37 @@ headless, profile or remote-debugging switches.
 | `runtime` | `'bootstrap'`: enable during setup then disable; true keeps reporting, false leaves it untouched |
 | `page`, `network`, `service_worker` | true; enable the corresponding domains |
 | `focus_emulation` | true |
-| `binding` | true; adds `_send_to_cdp` |
+| `binding` | Binding name, default `'_send_to_cdp'`; false disables it; true retains the default name |
 | `background_service` | true; clears, observes and records `pushMessaging` |
 
 Unsupported setup commands are collected in `page.setup_errors`. Target options
 survive reconnection/recreation in the same manager. Creation parameters do not
 navigate an existing page. Closed/crashed targets are recreated on the next call.
 Commands are never replayed automatically after timeout or connection failure.
+
+The binding name belongs to the target and is available in the existing maps:
+
+```js
+await cdp.call({
+  method: 'Runtime.evaluate',
+  params: {
+    target: {
+      name: 'page',
+      binding: 'send_to_host',
+      runtime: true,
+    },
+    expression: 'send_to_host("hello")',
+  },
+})
+
+const target = cdp.browsers.get('main').targets.get('page')
+console.log(target.options.binding) // 'send_to_host'
+// For an explicit page session, use page.options.binding.
+```
+
+`Runtime.bindingCalled` reports the same name in its `name` field. Configuration
+is applied during target initialization and reused on reconnect or recreation;
+changing the stored field alone does not rename a binding in a running page.
 
 ## Events and lifetime
 

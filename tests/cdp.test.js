@@ -34,6 +34,45 @@ test('XPath extensions quote strings and compare case-insensitively', () => {
   assert.match(xpx('//a[icontains(@title,"HELLO")]'), /translate\("HELLO"/)
 })
 
+test('custom methods are ordinary mutable handlers and return their own results', async t => {
+  const client = new CDP()
+  const other = new CDP()
+  t.after(() => client.close())
+  t.after(() => other.close())
+  const params = Object.freeze({ value: 21 })
+  client.custom_methods['_.double'] = function (received) {
+    assert.equal(this, client)
+    assert.equal(received, params)
+    return received.value * 2
+  }
+  assert.equal(await client.call({
+    method: '_.double',
+    params,
+  }), 42)
+  assert.equal(client.browsers.size, 0, 'local handlers should not launch a browser')
+  await assert.rejects(other.call({ method: '_.double' }), /Unknown CDP extension/)
+
+  client.custom_methods['_.find'] = async function (received) {
+    return { custom: received.value }
+  }
+  assert.deepEqual(await client.call({
+    method: '_.find',
+    params,
+  }), { custom: 21 })
+  assert.notEqual(client.custom_methods['_.find'], other.custom_methods['_.find'])
+  delete client.custom_methods['_.find']
+  await assert.rejects(client.call({ method: '_.find' }), /Unknown CDP extension/)
+
+  const failure = new Error('custom handler failed')
+  client.custom_methods = {
+    '_.fail'() {
+      throw failure
+    },
+  }
+  await assert.rejects(client.call({ method: '_.fail' }), error => error === failure)
+  await assert.rejects(client.call({ method: '_.double' }), /Unknown CDP extension/)
+})
+
 test('structured calls return native results; concurrent calls reuse one page', { timeout: 60000 }, async t => {
   const client = await fixture(t)
   const target = {
@@ -55,6 +94,7 @@ test('structured calls return native results; concurrent calls reuse one page', 
   assert.equal(client.browsers.size, 1)
   assert.equal(record.targets.size, 1)
   const tid = record.targets.get('page').tid
+  assert.equal(record.targets.get('page').options.binding, '_send_to_cdp')
   assert.deepEqual(record.socket.pages.get(tid).setup_errors, [])
   const pages = (await call(client, 'Target.getTargets', {}, null)).targetInfos.filter(value => value.type === 'page')
   assert.equal(pages.length, 1, 'owned startup blank should close')
@@ -116,6 +156,36 @@ test('custom click/find route through Runtime.evaluate, with no separate image h
     xpath: '//button',
     attempts: 0,
   }), /attempts/)
+
+  client.custom_methods['_.answer'] = function (params) {
+    return this.call({
+      method: 'Runtime.evaluate',
+      params: {
+        ...params,
+        expression: '6 * 7',
+        returnByValue: true,
+      },
+    })
+  }
+  assert.equal((await call(client, '_.answer')).result.value, 42)
+
+  const record = client.browsers.get('main')
+  const page = record.socket.pages.get(record.targets.get('page').tid)
+  assert.equal((await page.call({
+    method: '_.find',
+    params: { xpath: '//button' },
+  })).result.value.count, 1)
+  page.custom_methods['_.find'] = function (params) {
+    assert.equal(this, page)
+    return params.xpath
+  }
+  assert.equal(await page.call({
+    method: '_.find',
+    params: { xpath: '//custom' },
+  }), '//custom')
+  delete page.custom_methods['_.find']
+  await assert.rejects(page.call({ method: '_.find' }), /Unknown CDP extension/)
+  assert.equal((await call(client, '_.find', { xpath: '//button' })).result.value.count, 1)
 })
 
 test('direct events carry labels; reconnect retains only in-memory target routing', { timeout: 60000 }, async t => {
@@ -123,12 +193,13 @@ test('direct events carry labels; reconnect retains only in-memory target routin
   await call(client, 'Runtime.enable', {}, {
     name: 'page',
     runtime: true,
+    binding: 'send_to_host',
   })
   const notifications = []
   const bindings = []
   client.addEventListener('notify', event => notifications.push(event.detail))
   client.addEventListener('Runtime.bindingCalled', event => bindings.push(event.detail))
-  await call(client, 'Runtime.evaluate', { expression: 'console.log("first"); console.log("second"); _send_to_cdp("payload")' })
+  await call(client, 'Runtime.evaluate', { expression: 'console.log("first"); console.log("second"); send_to_host("payload")' })
   assert.deepEqual(
     notifications
       .filter(value => value.method === 'Runtime.consoleAPICalled')
@@ -136,10 +207,17 @@ test('direct events carry labels; reconnect retains only in-memory target routin
     ['first', 'second'],
   )
   assert.equal(bindings[0].payload, 'payload')
+  assert.equal(bindings[0].name, 'send_to_host')
   assert.equal(bindings[0].browser, 'main')
   assert.equal(bindings[0].target, 'page')
   const record = client.browsers.get('main')
   const tid = record.targets.get('page').tid
+  assert.equal(record.targets.get('page').options.binding, 'send_to_host')
+  assert.equal(record.socket.pages.get(tid).options.binding, 'send_to_host')
+  assert.equal((await call(client, 'Runtime.evaluate', {
+    expression: 'typeof _send_to_cdp',
+    returnByValue: true,
+  })).result.value, 'undefined')
   const closed = record.socket.on_first('close')
   record.socket.close()
   await closed
@@ -148,6 +226,13 @@ test('direct events carry labels; reconnect retains only in-memory target routin
     returnByValue: true,
   })).result.value, 42)
   assert.equal(record.targets.get('page').tid, tid)
+  await call(client, 'Runtime.evaluate', { expression: 'send_to_host("reconnected")' })
+  assert.equal(bindings.at(-1).payload, 'reconnected')
+  assert.equal(bindings.at(-1).name, record.targets.get('page').options.binding)
+  await call(client, 'Target.closeTarget', { targetId: tid }, null)
+  await call(client, 'Runtime.evaluate', { expression: 'send_to_host("recreated")' })
+  assert.equal(bindings.at(-1).payload, 'recreated')
+  assert.equal(bindings.at(-1).name, 'send_to_host')
 })
 
 test('browser labels isolate profiles; initialization flags and option conflicts', { timeout: 60000 }, async t => {
@@ -197,7 +282,18 @@ test('low-level API and existing browser attachment via WS, HTTP and port', { ti
     owner.close()
     if (proc.exitCode === null && proc.signalCode === null) proc.kill()
   })
-  const page = await owner.createTarget({ runtime: false })
+  const page = await owner.createTarget({
+    runtime: false,
+    binding: false,
+  })
+  assert.equal(page.options.binding, false)
+  assert.equal((await page.call({
+    method: 'Runtime.evaluate',
+    params: {
+      expression: 'typeof _send_to_cdp',
+      returnByValue: true,
+    },
+  })).result.value, 'undefined')
   assert.equal((await page.call({
     method: 'Runtime.evaluate',
     params: {

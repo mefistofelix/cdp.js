@@ -12,7 +12,7 @@ const page_defaults = {
   network: true,
   service_worker: true,
   focus_emulation: true,
-  binding: true,
+  binding: '_send_to_cdp',
   background_service: true,
 }
 const emit = (target, name, detail) => target.dispatchEvent(new CustomEvent(name, { detail }))
@@ -378,15 +378,14 @@ function integer(value, min, max, name) {
   return value
 }
 
-function extension_request(method, params) {
-  if (!['_.click', '_.find'].includes(method)) throw new Error(`Unknown CDP extension: ${method}`)
-  if (!params.xpath) throw new Error(`${method} requires xpath`)
-  const quoted = JSON.stringify(xpx(params.xpath))
-  let expression
-  if (method === '_.click') {
+export const custom_methods = {
+  '_.click'(params) {
+    if (params.target == null && !this.tid) throw new Error('_.click requires target')
+    if (!params.xpath) throw new Error('_.click requires xpath')
+    const quoted = JSON.stringify(xpx(params.xpath))
     const attempts = integer(params.attempts ?? 5, 1, 20, 'attempts')
     const interval = integer(params.interval_ms ?? 300, 0, 5000, 'interval_ms')
-    expression = `(async () => {
+    const expression = `(async () => {
       for (let i = 0; i < ${attempts}; i++) {
         const node = document.evaluate(
           ${quoted}, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null
@@ -402,9 +401,25 @@ function extension_request(method, params) {
       }
       return false;
     })()`
-  } else {
+    return this.call({
+      method: 'Runtime.evaluate',
+      params: {
+        browser: params.browser,
+        target: params.target,
+        expression,
+        returnByValue: true,
+        awaitPromise: true,
+        silent: true,
+        userGesture: true,
+      },
+    })
+  },
+  '_.find'(params) {
+    if (params.target == null && !this.tid) throw new Error('_.find requires target')
+    if (!params.xpath) throw new Error('_.find requires xpath')
+    const quoted = JSON.stringify(xpx(params.xpath))
     const limit = integer(params.limit ?? 20, 1, 100, 'limit')
-    expression = `(() => {
+    const expression = `(() => {
       const snapshot = document.evaluate(
         ${quoted}, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null
       );
@@ -441,17 +456,19 @@ function extension_request(method, params) {
         items,
       };
     })()`
-  }
-  return {
-    method: 'Runtime.evaluate',
-    params: {
-      expression,
-      returnByValue: true,
-      awaitPromise: true,
-      silent: true,
-      userGesture: method === '_.click',
-    },
-  }
+    return this.call({
+      method: 'Runtime.evaluate',
+      params: {
+        browser: params.browser,
+        target: params.target,
+        expression,
+        returnByValue: true,
+        awaitPromise: true,
+        silent: true,
+        userGesture: false,
+      },
+    })
+  },
 }
 
 export class cdp_page extends EventTarget {
@@ -460,10 +477,12 @@ export class cdp_page extends EventTarget {
     this.wscdp = browser
     this.tid = tid
     this.sid = null
+    this.custom_methods = { ...custom_methods }
     this.options = {
       ...page_defaults,
       ...options,
     }
+    if (this.options.binding === true) this.options.binding = page_defaults.binding
     this.closed = false
     this.setup_errors = []
     this.initializations = new Map()
@@ -481,7 +500,7 @@ export class cdp_page extends EventTarget {
         if (options.network) steps.push(['Network.enable', {}])
         if (options.service_worker) steps.push(['ServiceWorker.enable', {}])
         if (options.focus_emulation) steps.push(['Emulation.setFocusEmulationEnabled', { enabled: true }])
-        if (options.binding) steps.push(['Runtime.addBinding', { name: '_send_to_cdp' }])
+        if (options.binding) steps.push(['Runtime.addBinding', { name: options.binding }])
         if (options.background_service) {
           steps.push(
             ['BackgroundService.clearEvents', { service: 'pushMessaging' }],
@@ -517,13 +536,15 @@ export class cdp_page extends EventTarget {
 
   async call({ method, params = {} }) {
     if (this.closed) throw new Error('CDP target is closed')
+    if (method.startsWith('_.')) {
+      const handler = this.custom_methods[method]
+      if (!handler) throw new Error(`Unknown CDP extension: ${method}`)
+      return handler.call(this, params)
+    }
     await this.wscdp.attachTarget(this.tid)
-    const operation = method.startsWith('_.') ? extension_request(method, params) : {
+    return this.wscdp.req({
       method,
       params,
-    }
-    return this.wscdp.req({
-      ...operation,
       sessionId: this.sid,
     })
   }
@@ -755,6 +776,7 @@ export class CDP extends EventTarget {
     this.base_path = path.resolve(base_path)
     this.options = options
     this.browsers = new Map()
+    this.custom_methods = { ...custom_methods }
     this.closing = false
   }
 
@@ -833,6 +855,7 @@ export class CDP extends EventTarget {
       ...target?.options,
       ...spec.options,
     }
+    if (options.binding === true) options.binding = page_defaults.binding
     if (options.create_params.forTab) throw new Error('forTab=true is unsupported for logical pages')
     if (![true, false, 'bootstrap'].includes(options.runtime)) throw new Error('runtime must be true, false or bootstrap')
     if (
@@ -940,13 +963,12 @@ export class CDP extends EventTarget {
   async call({ method, params = {} }) {
     if (typeof method !== 'string' || !method) throw new Error('call.method is required')
     if (!params || typeof params !== 'object' || Array.isArray(params)) throw new Error('call.params must be an object')
-    const { browser = 'main', target: target_input, ...native_params } = params
-    const custom = method.startsWith('_.')
-    if (custom && target_input == null) throw new Error(method + ' requires target')
-    const operation = custom ? extension_request(method, native_params) : {
-      method,
-      params: native_params,
+    if (method.startsWith('_.')) {
+      const handler = this.custom_methods[method]
+      if (!handler) throw new Error(`Unknown CDP extension: ${method}`)
+      return handler.call(this, params)
     }
+    const { browser = 'main', target: target_input, ...native_params } = params
     const record = this._configure(browser)
     const target = target_input == null ? null : this._configure_target(record, target_input)
     if (target) target.reservations++
@@ -954,7 +976,8 @@ export class CDP extends EventTarget {
       const socket = await this._browser(record)
       const page = target ? await this._target(record, target) : null
       const request = {
-        ...operation,
+        method,
+        params: native_params,
         ...(page ? { sessionId: page.sid } : {}),
       }
       try {
@@ -1008,6 +1031,7 @@ export default {
   wsjrpc,
   wscdp,
   cdp_page,
+  custom_methods,
   launch,
   connect,
   xpx,
