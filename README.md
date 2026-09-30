@@ -1,7 +1,8 @@
 # cdp.js
 
 Low-level Chromium DevTools Protocol library. Node.js 22.19+, Chrome/Chromium/Edge,
-and no npm dependencies. The original reference implementations are in `extra/`.
+and no npm dependencies. The original reference implementations and unused
+`x.js` utilities are in `extra/`.
 
 ## Calls
 
