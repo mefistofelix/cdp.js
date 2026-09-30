@@ -207,6 +207,7 @@ local configuration.
 | `preferences` | object, `{}` | Dotted JSON preference overrides applied after generated preference defaults. |
 | `connect_timeout_ms` | number, `15000` | Timeout for each discovery, launch-readiness or socket-opening wait; not one combined deadline. |
 | `request_timeout_ms` | number, `30000` | Default timeout for each protocol request on this browser's socket. |
+| `waitForDebuggerOnStart` | boolean, `false` | Ask Chromium to pause newly auto-attached targets. Applied to `Target.setAutoAttach` when connecting; not a CLI argument or target option. |
 | `websocket_url` | string, unset | Attach directly to a browser WebSocket endpoint. |
 | `http_url` | string, unset | Discover the endpoint from an HTTP(S) base URL or exact `/json/version` URL. |
 | `port` | number, unset | Discover an existing browser at `http://<host>:<port>/json/version`. |
@@ -534,8 +535,35 @@ Domain options set to false skip setup commands; they do not actively disable a
 domain already enabled by another caller. Likewise, `binding: false` does not
 remove a previously installed binding. Use native CDP commands for immediate
 changes. `initialize: false` skips binding installation too;
-`Runtime.runIfWaitingForDebugger` is still sent at the end. Auto-attachment uses
-`waitForDebuggerOnStart: false`.
+`Runtime.runIfWaitingForDebugger` is still sent at the end. The browser option
+`waitForDebuggerOnStart` defaults to `false`. With `true`, auto-attachment requests
+a pause. Bootstrap setup sends `Runtime.disable` before the resume command.
+To ensure setup completes before navigating, keep the initial `about:blank` and
+use `Page.navigate` afterward, as below. The pause flag alone does not guarantee
+that a URL supplied through `create_params.url` waits for setup; Chromium can
+execute that navigation's scripts during initialization.
+
+Set this option in constructor browser defaults or in `params.browser`:
+
+```js
+await client.call({
+  method: 'Page.navigate',
+  params: {
+    browser: {
+      name: 'paused',
+      waitForDebuggerOnStart: true,
+    },
+    target: 'page',
+    url: 'https://example.com/',
+  },
+})
+```
+
+The setting affects auto-attachment across that browser connection. Only targets
+selected through `params.target` receive setup and automatic resume. Other newly
+auto-attached tabs can remain paused: select their physical ID using
+`params.target.targetId`, or send `Runtime.runIfWaitingForDebugger` through the
+browser socket with their `sessionId`.
 
 Setup CDP errors are collected as strings in `target.setup_errors`, allowing the
 sequence to continue when a browser/target does not support a setup command.

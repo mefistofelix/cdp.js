@@ -386,7 +386,7 @@ export class cdp extends EventTarget {
       params: {
         autoAttach: true,
         flatten: true,
-        waitForDebuggerOnStart: false,
+        waitForDebuggerOnStart: record.waitForDebuggerOnStart ?? false,
       },
     })
     await socket.req({

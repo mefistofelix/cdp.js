@@ -125,6 +125,13 @@ keeps reporting. `initialize: false` skips optional setup, including bindings,
 but still sends `Runtime.runIfWaitingForDebugger`. Setting a setup flag false
 skips an operation; it does not undo an operation already performed elsewhere.
 
+`waitForDebuggerOnStart` is a browser connection option, defaulting to false.
+Pass it to `Target.setAutoAttach`; selected targets resume after setup, including
+after bootstrap's `Runtime.disable`. Do not automatically initialize or resume
+unselected targets when this option is enabled.
+Keep `about:blank` followed by `Page.navigate` when setup must precede navigation;
+do not assume the pause flag prevents scripts from a direct `create_params.url`.
+
 Setup CDP errors go into `target.setup_errors`; transport errors/timeouts still
 fail initialization. Normal request errors reject with the response in `error.cdp`
 and request/response context in `error.cause`. Page-side JavaScript exceptions

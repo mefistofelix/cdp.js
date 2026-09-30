@@ -78,6 +78,8 @@ test('custom methods are ordinary mutable handlers and return their own results'
 
 test('structured calls return native results; concurrent calls reuse one page', { timeout: 60000 }, async t => {
   const client = await fixture(t)
+  const attached = []
+  client.addEventListener('Target.attachedToTarget', event => attached.push(event.detail))
   const target = {
     name: 'page',
     runtime: true,
@@ -97,6 +99,7 @@ test('structured calls return native results; concurrent calls reuse one page', 
   assert.equal(Object.keys(client.browsers).length, 1)
   assert.equal(Object.keys(record.targets).length, 1)
   const tid = record.targets.page.targetId
+  assert.equal(attached.find(event => event.targetInfo.targetId === tid).waitingForDebugger, false)
   assert.equal(record.targets.page.binding, '_send_to_cdp')
   assert.deepEqual(record.targets.page.setup_errors, [])
   const pages = (await call(client, 'Target.getTargets', {}, null)).targetInfos.filter(value => value.type === 'page')
@@ -137,6 +140,43 @@ test('structured calls return native results; concurrent calls reuse one page', 
   })))
   assert.deepEqual(concurrent.map(response => response.result.value), Array.from({ length: 20 }, (_, value) => value))
   assert.equal(getEventListeners(socket, 'close').length, listeners)
+})
+
+test('browser pause option resumes targets before navigation and allows browser overrides', { timeout: 60000 }, async t => {
+  const client = await fixture(t, { waitForDebuggerOnStart: true })
+  const attached = []
+  const consoleEvents = []
+  client.addEventListener('Target.attachedToTarget', event => attached.push(event.detail))
+  client.addEventListener('Runtime.consoleAPICalled', event => consoleEvents.push(event.detail))
+  const loaded = util.on_first(client, 'Page.loadEventFired')
+  await call(client, 'Page.navigate', {
+    url: 'data:text/html,<script>window.started = true; console.log("startup")</script>',
+  })
+  await loaded
+  const target = client.browsers.main.targets.page
+  assert.equal(attached.find(event => event.targetInfo.targetId === target.targetId).waitingForDebugger, true)
+  assert.deepEqual(target.setup_errors, [])
+  assert.equal((await call(client, 'Runtime.evaluate', {
+    expression: 'window.started',
+    returnByValue: true,
+  })).result.value, true, 'page scripts must run after setup resumes the target')
+  assert.deepEqual(consoleEvents, [], 'bootstrap must disable Runtime before page scripts run')
+
+  const reported = util.on_first(client, 'Runtime.consoleAPICalled')
+  await call(client, 'Page.navigate', {
+    url: 'data:text/html,<script>console.log("startup")</script>',
+  }, {
+    name: 'reporting',
+    runtime: true,
+  })
+  assert.equal((await reported).args[0].detail.args[0].value, 'startup')
+
+  await call(client, 'Runtime.evaluate', { expression: '1' }, 'page', {
+    name: 'unpaused',
+    waitForDebuggerOnStart: false,
+  })
+  const unpaused = client.browsers.unpaused.targets.page
+  assert.equal(attached.find(event => event.targetInfo.targetId === unpaused.targetId).waitingForDebugger, false)
 })
 
 test('custom click/find route through Runtime.evaluate, with no separate image helpers', { timeout: 60000 }, async t => {
