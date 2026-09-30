@@ -804,6 +804,10 @@ Contributors and coding agents should read [AGENTS.md](AGENTS.md) and
 `extra/`, when present locally, holds ignored reference files and is not part of
 the tracked source or runtime dependencies.
 
+[Manual chat monitoring](tests/chat-monitoring.md) documents the observed network
+workflow for detecting new conversations and extracting connector session handles
+from tool-call history. It is a caller-side recipe, not additional library API.
+
 ```sh
 node --check cdp.js
 node --test tests/cdp.test.js

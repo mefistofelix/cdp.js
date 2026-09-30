@@ -11,6 +11,7 @@ Apply the user's current instructions to the task at hand.
 | --- | --- |
 | `cdp.js` | Complete maintained implementation, an ES module importing only Node.js built-ins. |
 | `tests/cdp.test.js` | Node test-runner coverage with real headless Chromium. |
+| `tests/chat-monitoring.md` | Manual application traffic inspection and tool-session extraction recipe. |
 | `README.md` | User-facing API, defaults, argument/option semantics and examples. |
 | `DEV_PREF.md` | Shared engineering and Git preferences; read first. |
 | `AGENTS.md` | Project-specific maintenance guidance. |
@@ -157,6 +158,11 @@ utility dependencies, SQLite persistence, batch methods, image helpers, event
 filtering/buffering/polling, or a Page abstraction. Native CDP pass-through remains
 available; these exclusions concern library-level features. Do not introduce
 references to unrelated projects in the maintained API/docs.
+
+The explicitly requested application recipe in `tests/chat-monitoring.md` names
+the services whose traffic it explains. Keep those observed schemas and connector
+details in that recipe, outside the library implementation. Use synthetic values
+in its examples; never copy real account/session data into documentation or tests.
 
 Use descriptive names and one object property per line. Optimize cognitive
 simplicity first, source characters second, not line count. Prefer native
