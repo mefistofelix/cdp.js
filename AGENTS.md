@@ -16,6 +16,7 @@ Apply the user's current instructions to the task at hand.
 | `npm/PUBLISHING.md` | Initial npm login/publication and trusted publisher setup. |
 | `.github/workflows/npm.yml` | Manual OIDC npm publication, with an optional commented tag trigger. |
 | `README.md` | User-facing API, defaults, argument/option semantics and examples. |
+| `TODO.md` | Planned work and feasibility questions; not implemented API. |
 | `DEV_PREF.md` | Shared engineering and Git preferences; read first. |
 | `AGENTS.md` | Project-specific maintenance guidance. |
 | `extra/` | Optional local reference files; ignored, untracked and not imported at runtime. |

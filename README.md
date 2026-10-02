@@ -845,6 +845,7 @@ try {
 
 Contributors and coding agents should read [AGENTS.md](AGENTS.md) and
 [DEV_PREF.md](DEV_PREF.md). The maintained implementation is [cdp.js](cdp.js).
+Planned work is tracked in [TODO.md](TODO.md).
 `extra/`, when present locally, holds ignored reference files and is not part of
 the tracked source or runtime dependencies.
 
