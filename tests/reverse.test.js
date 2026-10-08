@@ -65,11 +65,18 @@ Deno.test('reverse extension controls real Chrome without remote-debugging argum
     assert.equal(Object.keys(record.targets).length, 1)
     const targetId = record.targets.page.targetId
     const oldSession = record.targets.page.sessionId
+    assert.equal(oldSession, targetId, 'root routing uses the stable tab ID directly')
     const targets = await call('Target.getTargets', {}, null)
     assert.equal(targets.targetInfos.some(info => info.targetId === targetId), true)
     assert.equal(targets.targetInfos.filter(info => info.type === 'page').length, 2, 'initial blank tab survives')
     const version = await call('Browser.getVersion', {}, null)
     assert.match(version.product, /Chrome/)
+    assert.equal((await call('Runtime.evaluate', { expression: '43' }, {
+      name: '__proto__',
+      initialize: false,
+    })).result.value, 43)
+    assert.equal(record.targets.__proto__.sessionId, record.targets.__proto__.targetId)
+    assert.equal(record.session_targets[record.targets.__proto__.sessionId], record.targets.__proto__.targetId)
 
     const network = util.on_first(client, 'Network.requestWillBeSent')
     const loaded = util.on_first(client, 'Page.loadEventFired')
@@ -105,6 +112,10 @@ Deno.test('reverse extension controls real Chrome without remote-debugging argum
       sessionId: worker.sessionId,
     })
     assert.equal(workerResult.result.value, 'DedicatedWorkerGlobalScope')
+    const workerDetached = util.on_first(client, 'Target.detachedFromTarget')
+    await call('Target.detachFromTarget', { sessionId: worker.sessionId }, null)
+    assert.equal((await workerDetached).args[0].detail.sessionId, worker.sessionId)
+    assert.equal(record.session_targets[worker.sessionId], undefined)
 
     const lost = util.on_first(client, 'close')
     record.socket.close()
@@ -112,11 +123,11 @@ Deno.test('reverse extension controls real Chrome without remote-debugging argum
     const resumed = await call('Runtime.evaluate', { expression: '40 + 2' })
     assert.equal(resumed.result.value, 42)
     assert.equal(record.targets.page.targetId, targetId)
-    assert.notEqual(record.targets.page.sessionId, oldSession)
+    assert.equal(record.targets.page.sessionId, oldSession)
     const reconnectedSession = record.targets.page.sessionId
     record.socket.close()
     assert.equal((await call('Runtime.evaluate', { expression: '42' })).result.value, 42)
-    assert.notEqual(record.targets.page.sessionId, reconnectedSession)
+    assert.equal(record.targets.page.sessionId, reconnectedSession)
     const issued = util.on_first(client, 'Runtime.consoleAPICalled')
     const interrupted = call('Runtime.evaluate', {
       expression: 'window.executions = (window.executions || 0) + 1; console.log("issued"); new Promise(() => {})',

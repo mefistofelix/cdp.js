@@ -22,8 +22,7 @@ function target_info(tab) {
 }
 
 function detached(source) {
-  const sessionId = attached[source.tabId]
-  if (!sessionId) return
+  if (!attached[source.tabId]) return
   delete attached[source.tabId]
   for (const [id, session] of Object.entries(sessions)) {
     if (session.tabId === source.tabId) delete sessions[id]
@@ -31,7 +30,7 @@ function detached(source) {
   send({
     method: 'Target.detachedFromTarget',
     params: {
-      sessionId,
+      sessionId: String(source.tabId),
       targetId: String(source.tabId),
     },
   })
@@ -44,18 +43,17 @@ async function attach_tab(tabId) {
     await chrome.debugger.detach(source)
     throw new Error('Reverse connection closed during attachment')
   }
-  const sessionId = attached[tabId] = crypto.randomUUID()
-  sessions[sessionId] = source
+  attached[tabId] = true
   await chrome.debugger.sendCommand(source, 'Target.setAutoAttach', auto_attach)
   send({
     method: 'Target.attachedToTarget',
     params: {
-      sessionId,
+      sessionId: String(tabId),
       targetInfo: target_info(await chrome.tabs.get(tabId)),
       waitingForDebugger: false,
     },
   })
-  return { sessionId }
+  return { sessionId: String(tabId) }
 }
 
 const methods = {
@@ -102,12 +100,11 @@ const methods = {
   async 'Target.attachToTarget'(params) {
     const tabId = Number(params.targetId)
     if (attaching[tabId]) return attaching[tabId]
-    if (attached[tabId]) return { sessionId: attached[tabId] }
-    return attaching[tabId] ??= attach_tab(tabId).finally(() => delete attaching[tabId])
+    if (attached[tabId]) return { sessionId: String(tabId) }
+    return attaching[tabId] = attach_tab(tabId).finally(() => delete attaching[tabId])
   },
   async 'Target.detachFromTarget'(params) {
-    const source = sessions[params.sessionId]
-    if (!source) throw new Error('Unknown debugger session')
+    const source = sessions[params.sessionId] ?? { tabId: Number(params.sessionId) }
     if (source.sessionId) {
       await chrome.debugger.sendCommand({ tabId: source.tabId }, 'Target.detachFromTarget', { sessionId: source.sessionId })
     } else {
@@ -126,24 +123,18 @@ const methods = {
 }
 
 chrome.debugger.onEvent.addListener((source, method, params) => {
-  const root = attached[source.tabId]
-  if (!root) return
+  if (!attached[source.tabId]) return
   if (method === 'Target.attachedToTarget' || method === 'Target.detachedFromTarget') {
-    const sessionId = root + ':' + params.sessionId
-    if (method === 'Target.attachedToTarget') sessions[sessionId] = {
+    if (method === 'Target.attachedToTarget') sessions[params.sessionId] = {
       tabId: source.tabId,
       sessionId: params.sessionId,
     }
-    else delete sessions[sessionId]
-    params = {
-      ...params,
-      sessionId,
-    }
+    else delete sessions[params.sessionId]
   }
   send({
     method,
     params,
-    sessionId: source.sessionId ? root + ':' + source.sessionId : root,
+    sessionId: source.sessionId ?? String(source.tabId),
   })
 })
 chrome.debugger.onDetach.addListener(detached)
@@ -178,9 +169,9 @@ function connect() {
     const { method, params = {}, sessionId, id } = request
     let response
     try {
-      if (!sessionId && !methods[method]) throw new Error('Unsupported reverse browser command: ' + method)
-      const result = sessionId
-        ? await chrome.debugger.sendCommand(sessions[sessionId], method, params)
+      if (sessionId == null && !methods[method]) throw new Error('Unsupported reverse browser command: ' + method)
+      const result = sessionId != null
+        ? await chrome.debugger.sendCommand(sessions[sessionId] ?? { tabId: Number(sessionId) }, method, params)
         : await methods[method](params)
       response = {
         id,

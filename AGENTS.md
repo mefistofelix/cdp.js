@@ -68,8 +68,15 @@ sockets and the listener, preserving external browser processes and tabs.
 
 `cdp_ext` translates only the documented browser-level command subset through
 Chrome tabs/debugger APIs; session commands use native `chrome.debugger`.
-Root tab IDs, virtual root sessions and flattened native child sessions must stay
-distinct. The extension uses a first-message announcement, an awake retry timer,
+Root tab IDs and flattened native child sessions must stay distinct. The shared
+reverse envelope keeps `sessionId`: for roots it contains the stable stringified
+tab ID, translated directly to `{ tabId }`. No root UUID or root-session lookup
+is needed. Only native child sessions need a mapping to `{ tabId, sessionId }`;
+keep their IDs unchanged without prefixes. Logical target labels stay in the
+manager. Root attachment responses/notifications use the tab ID as their routing
+reference. It survives reconnect, but attachment/setup state does not. Do not
+duplicate the manager's request flow merely to rename transport fields.
+The extension uses a first-message announcement, an awake retry timer,
 empty-text heartbeats and a Chrome alarm for offline worker wakeup. Browser-level
 pausing of new root tabs is unsupported and must fail explicitly. Never silently
 claim full browser CDP or Firefox compatibility.

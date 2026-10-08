@@ -369,10 +369,19 @@ messages use existing CDP envelopes:
 - Notification: `{ method, params, sessionId? }`.
 - Empty text: heartbeat, ignored by `jsrpc`.
 
-Top-level target IDs are stringified Chrome tab IDs. Root session IDs are generated
-per attachment; flattened child session IDs include the root ID and native child
-session ID. Treat all session IDs as opaque strings. Target labels remain manager
-configuration; they are not added to raw protocol notifications.
+Top-level target IDs are stringified Chrome tab IDs, stable while a tab survives.
+For root commands, the envelope's `sessionId` is that tab ID: the extension sends
+to `{ tabId: Number(sessionId) }` without a root-session lookup or generated UUID.
+`Target.attachToTarget` returns the same tab ID in `sessionId`, and root
+notifications use it too. This keeps the shared manager and RPC flow unchanged;
+it is a reverse routing reference, not a native root CDP session.
+
+Worker and out-of-process iframe commands still use real flattened CDP sessions.
+Their native session IDs pass through unchanged, without prefixes. The extension
+only stores child sessions, associating each with its Chrome `{ tabId, sessionId }`
+debuggee. Explicit detach takes `params.sessionId` for either a tab or child
+session. Logical target labels remain inside the manager. Reconnecting invalidates
+attachment/setup state even though a surviving root tab's routing ID stays the same.
 
 The extension adapts browser-level `Target.getTargets`, `getTargetInfo`,
 `setDiscoverTargets`, `setAutoAttach`, `createTarget`, `attachToTarget`,
