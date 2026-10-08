@@ -371,15 +371,18 @@ messages use existing CDP envelopes:
 
 Top-level target IDs are stringified Chrome tab IDs, stable while a tab survives.
 For root commands, the envelope's `sessionId` is that tab ID: the extension sends
-to `{ tabId: Number(sessionId) }` without a root-session lookup or generated UUID.
+to its registered `{ tabId }` debuggee without a generated UUID.
 `Target.attachToTarget` returns the same tab ID in `sessionId`, and root
 notifications use it too. This keeps the shared manager and RPC flow unchanged;
 it is a reverse routing reference, not a native root CDP session.
 
 Worker and out-of-process iframe commands still use real flattened CDP sessions.
 Their native session IDs pass through unchanged, without prefixes. The extension
-only stores child sessions, associating each with its Chrome `{ tabId, sessionId }`
-debuggee. Explicit detach takes `params.sessionId` for either a tab or child
+uses one `sessions` object for both roots and children: a tab ID maps to `{ tabId }`,
+and a native child session ID maps to `{ tabId, sessionId }`. Every target command
+looks up that object and passes the debuggee directly to `chrome.debugger.sendCommand`;
+there is no fallback that interprets unknown session IDs as tab IDs.
+Explicit detach takes `params.sessionId` for either a tab or child
 session. Logical target labels remain inside the manager. Reconnecting invalidates
 attachment/setup state even though a surviving root tab's routing ID stays the same.
 

@@ -70,9 +70,10 @@ sockets and the listener, preserving external browser processes and tabs.
 Chrome tabs/debugger APIs; session commands use native `chrome.debugger`.
 Root tab IDs and flattened native child sessions must stay distinct. The shared
 reverse envelope keeps `sessionId`: for roots it contains the stable stringified
-tab ID, translated directly to `{ tabId }`. No root UUID or root-session lookup
-is needed. Only native child sessions need a mapping to `{ tabId, sessionId }`;
-keep their IDs unchanged without prefixes. Logical target labels stay in the
+tab ID. Use one extension `sessions` object for roots (`{ tabId }`) and native
+children (`{ tabId, sessionId }`), with one lookup for command dispatch. Do not
+add a fallback that interprets an unknown session ID as a tab ID. Generate no root
+UUIDs and keep child IDs unchanged without prefixes. Logical target labels stay in the
 manager. Root attachment responses/notifications use the tab ID as their routing
 reference. It survives reconnect, but attachment/setup state does not. Do not
 duplicate the manager's request flow merely to rename transport fields.
