@@ -5,8 +5,9 @@ The package is `@mefistofelix/cdp.js`. Its version and metadata live in
 original `cdp.js`, with the same named and default exports and no dependencies.
 
 Following [auto.js](https://github.com/mefistofelix/auto.js), publication copies
-`cdp.js` and the root README into `npm/`, then publishes that directory. The copies
-are ignored by Git. There is no compilation, build script, or wrapper module.
+`cdp.js`, the root README and the two `cdp_ext/` files into `npm/`, then publishes
+that directory. The extension files allow managed reverse launches from npm.
+The copies are ignored by Git. There is no compilation, build script, or wrapper module.
 
 ## Release through GitHub
 
@@ -21,8 +22,9 @@ Version `0.1.0` is already published. For the next release:
 gh workflow run npm.yml --ref master
 ```
 
-The workflow copies the two files and publishes the selected commit's manifest
-version. npm versions are immutable: do not rerun publication of the same version.
+The workflow copies the library, README and extension, then publishes the selected
+commit's manifest version. npm versions are immutable: do not rerun publication
+of the same version.
 Routine pushes do not publish. The optional tag trigger is commented out; if
 enabled, keep each `v` tag consistent with the manifest version.
 
@@ -35,16 +37,18 @@ node --check cdp.js
 node --test tests/cdp.test.js
 ```
 
-Copy the two files from the repository root. In PowerShell:
+Copy the library, README and extension from the repository root. In PowerShell:
 
 ```powershell
 Copy-Item cdp.js, README.md npm/
+Copy-Item cdp_ext npm/ -Recurse -Force
 ```
 
 On Linux or macOS:
 
 ```sh
 cp cdp.js README.md npm/
+cp -r cdp_ext npm/
 ```
 
 Then inspect without publishing:
@@ -53,8 +57,9 @@ Then inspect without publishing:
 npm pack ./npm --dry-run
 ```
 
-The archive must contain exactly `package.json`, `cdp.js`, and `README.md`.
-The manifest's `files` allowlist includes the source; npm includes the manifest
+The archive must contain exactly `package.json`, `cdp.js`, `README.md`,
+`cdp_ext/manifest.json`, and `cdp_ext/cdp_ext.js`.
+The manifest's `files` allowlist includes the sources; npm includes the manifest
 and README automatically. Tests, profiles, tools, and local references stay out.
 Use `npm pack ./npm` to create a local archive if needed.
 

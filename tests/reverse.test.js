@@ -13,6 +13,7 @@ Deno.test('reverse extension controls real Chrome without remote-debugging argum
   await fs.mkdir(extension)
   const client = new cdp({
     reverse: true,
+    extension_id: browser.extension_id(extension),
     connect_timeout_ms: 20000,
   })
   const server = client.listen_reverse({ port: 0 })
@@ -186,7 +187,6 @@ Deno.test('reverse extension controls real Chrome without remote-debugging argum
     assert.notEqual(record.targets.page.targetId, targetId)
     const other_extension = path.join(directory, 'other-extension')
     await fs.mkdir(other_extension)
-    manifest.cdp.browser = 'other'
     await fs.writeFile(path.join(other_extension, 'manifest.json'), JSON.stringify(manifest))
     await fs.copyFile('cdp_ext/cdp_ext.js', path.join(other_extension, 'cdp_ext.js'))
     const other_args = util.args_to_strings(browser.build_args({
@@ -205,7 +205,10 @@ Deno.test('reverse extension controls real Chrome without remote-debugging argum
     const other = await client.call({
       method: 'Runtime.evaluate',
       params: {
-        browser: 'other',
+        browser: {
+          name: 'other',
+          extension_id: browser.extension_id(other_extension),
+        },
         target: 'page',
         expression: 'window.marker = "other"',
       },
@@ -224,5 +227,67 @@ Deno.test('reverse extension controls real Chrome without remote-debugging argum
     await exited
     other_proc?.kill()
     await other_exited
+  }
+})
+
+Deno.test('managed reverse launch uses extension identity and keeps a live process through disconnects', async () => {
+  const directory = await fs.mkdtemp(path.resolve('build/tests/managed-reverse-'))
+  const client = new cdp({
+    base_path: directory,
+    headless: true,
+    connect_timeout_ms: 20000,
+  })
+  client.listen_reverse({ port: 0 })
+  let exited
+  try {
+    const spec = {
+      name: 'work',
+      cdp_ext: true,
+      args: {
+        'user-data-dir': path.join(directory, 'pròfile'),
+        'profile-directory': 'Profile 1',
+      },
+    }
+    const call = () => client.call({
+      method: 'Runtime.evaluate',
+      params: {
+        browser: spec,
+        target: 'page',
+        expression: '42',
+      },
+    })
+    const results = await Promise.all([call(), call()])
+    assert.deepEqual(results.map(result => result.result.value), [42, 42])
+    const record = client.browsers.work
+    const original = record.proc
+    exited = once(original, 'exit')
+    const id = record.extension_id
+    assert.equal(record.extension_path, await fs.realpath(path.join(directory, 'pròfile', 'Profile 1', 'cdp_ext')))
+    assert.equal(client.reverse_sockets[id], record.socket)
+    assert.equal(client.reverse_sockets.work, undefined, 'logical name stays in the manager')
+    assert.equal(original.spawnargs.some(arg => arg.startsWith('--remote-debugging')), false)
+    assert.equal((await fs.readFile(path.join(record.extension_path, 'manifest.json'), 'utf8')).includes('"browser"'), false)
+    assert.equal(Object.keys(record.targets).length, 1)
+    const closed = util.on_first(client, 'close')
+    record.socket.close()
+    await closed
+    record.connect_timeout_ms = 1
+    await assert.rejects(call(), /abort/i)
+    assert.equal(record.proc, original)
+    assert.equal(original.exitCode, null, 'a connection timeout must not kill or replace the browser')
+    record.connect_timeout_ms = 20000
+    assert.equal((await call()).result.value, 42)
+    assert.equal(record.proc, original, 'extension reconnect reuses the live process')
+    const disconnected = util.on_first(client, 'close')
+    original.kill()
+    await exited
+    await disconnected
+    assert.equal((await call()).result.value, 42)
+    assert.notEqual(record.proc, original, 'only confirmed process exit permits relaunch')
+    assert.equal(record.extension_id, id, 'extension identity survives a browser relaunch')
+    exited = once(record.proc, 'exit')
+  } finally {
+    await client.close()
+    await exited
   }
 })

@@ -59,12 +59,26 @@ string rewrite belongs to `util`.
 the same request methods and event correlation. Do not duplicate this transport
 for reverse connections. Empty text is a heartbeat, not a JSON message.
 `cdp.listen_reverse` owns one native Deno server for all incoming extensions.
-The first JSON message announces `{ browser: name }`; do not assign separate
-ports or URL paths per browser. `reverse_sockets` is a public object keyed by that
-name. Reject duplicate live labels and keep old close events from deleting their
-replacement. Reverse browser records require `reverse: true`; they never launch
-processes or update profile files. Closing the manager also closes incoming
-sockets and the listener, preserving external browser processes and tabs.
+The first JSON message announces `{ browser: chrome.runtime.id }`; do not assign
+separate ports or URL paths per browser or put logical names in the manifest.
+`reverse_sockets` is a public object keyed by extension ID. Validate it against
+the captured upgrade origin, reject duplicate live IDs and keep old close events
+from deleting their replacement. `reverse: true` attaches externally, using
+`extension_id` or the browser name as the incoming ID. It never launches or writes
+profile files. `cdp_ext: true` instead starts the shared listener if needed and
+launches an owned process with a generated extension copy in the effective profile
+directory (or under the named base-path profile when no directory is configured).
+The copy sets only the server URL, never the logical name. Its path-derived
+Chromium ID is recorded in `record.extension_id`; `record.extension_path` is
+canonical. Preserve platform-specific path encoding in `browser.extension_id`.
+An unpacked manifest must have no `key` for this path-derived identity.
+Closing the manager stops owned processes, incoming sockets and the listener,
+preserving external browser processes and tabs.
+
+WebSocket closure is not evidence of browser exit. Connection errors/timeouts
+must not kill a managed reverse browser or cause another spawn while its process
+is alive. Wait for extension reconnection, and allow relaunch only after confirmed
+child-process exit. Concurrent calls share the same initialization promise.
 
 `cdp_ext` translates only the documented browser-level command subset through
 Chrome tabs/debugger APIs; session commands use native `chrome.debugger`.
@@ -219,8 +233,14 @@ on success, timeout and disconnect.
   Its default follows the effective directory, including generated named profiles;
   explicit true still cannot write files without a directory.
 - `browser.launch` returns `{ proc, url }` and opens no CDP socket. Track owned
-  processes separately from attachments. Closing a manager preserves external
-  browsers and profile directories. The browser option `windowsHide` defaults to
+  processes separately from attachments. With `cdp_ext: true`, it waits for spawn
+  instead of a DevTools endpoint and returns an undefined `url`; the manager must
+  prepare the extension copy and supply `extension_path` first. Generated flags
+  select the bridge and omit remote debugging, then raw arguments override them.
+  An extensions array adds its paths; `extensions: true` adds the profile wildcard.
+  `browser.launch` does not copy the extension or manage incoming connections.
+  Closing a manager preserves external browsers and profile directories.
+  The browser option `windowsHide` defaults to
   whether the final arguments include `--headless`, including raw overrides.
   An explicit value takes precedence and is passed to `spawn`.
 - Browser/target/session mappings remain in memory. Profile preference files do
@@ -287,10 +307,10 @@ Keep `extra/`, generated profiles and caches ignored. Do not re-add local refere
 files to Git without an explicit request. Update README for public behavior and
 this file for architecture/maintenance constraints.
 
-Keep npm metadata in `npm/`. Publishing copies `cdp.js` and `README.md` into that
-directory with one shell command; those copies stay ignored. No build or setup
-script is needed for this single-file library. The tarball must
-contain only `package.json`, `cdp.js`, and `README.md`; source bytes and exports
+Keep npm metadata in `npm/`. Publishing copies `cdp.js`, `README.md` and `cdp_ext/`
+into that directory; those copies stay ignored. No build or setup script is needed.
+The tarball contains only `package.json`, `cdp.js`, `README.md`, and the two
+extension files required for managed reverse launches; source bytes and exports
 must match direct-file use. Follow `npm/PUBLISHING.md` for authentication and
 release steps. Packaging must not change repository visibility, add a license
 without a user decision, or include profiles, tests, private data, or tools.

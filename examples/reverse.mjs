@@ -1,12 +1,12 @@
 import { cdp } from '../cdp.js'
 
 const client = new cdp({
-  reverse: true,
+  cdp_ext: true,
   connect_timeout_ms: 60000,
 })
 const server = client.listen_reverse()
 Deno.addSignalListener('SIGINT', () => client.close())
-console.log('Waiting for cdp_ext in Chrome; Ctrl+C closes the server.')
+console.log('Launching Chrome with cdp_ext; Ctrl+C closes Chrome and the server.')
 try {
   console.log(await client.call({ method: 'Browser.getVersion' }))
   console.log(await client.call({

@@ -13,7 +13,6 @@
   },
   "cdp": {
     "websocket_url": "ws://127.0.0.1:9223",
-    "browser": "main",
     "reconnect_ms": 5000
   }
 }

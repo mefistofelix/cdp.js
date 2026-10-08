@@ -165,7 +165,7 @@ function connect() {
   if (socket?.readyState === WebSocket.CONNECTING) return
   if (socket?.readyState === WebSocket.OPEN) return socket.send('')
   const connection = socket = new WebSocket(config.websocket_url ?? 'ws://127.0.0.1:9223')
-  connection.onopen = () => connection.send(JSON.stringify({ browser: config.browser ?? 'main' }))
+  connection.onopen = () => connection.send(JSON.stringify({ browser: chrome.runtime.id }))
   connection.onmessage = async event => {
     if (!event.data) return
     const request = JSON.parse(event.data)

@@ -5,7 +5,9 @@
   "type": "module",
   "exports": "./cdp.js",
   "files": [
-    "cdp.js"
+    "cdp.js",
+    "cdp_ext/manifest.json",
+    "cdp_ext/cdp_ext.js"
   ],
   "engines": {
     "node": ">=22.19.0"

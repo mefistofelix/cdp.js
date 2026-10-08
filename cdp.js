@@ -2,6 +2,7 @@ import * as child_process from 'node:child_process'
 import * as fs from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import * as path from 'node:path'
+import * as crypto from 'node:crypto'
 import { once, setMaxListeners } from 'node:events'
 
 export class util {
@@ -95,6 +96,12 @@ export class jsrpc extends WebSocket {
 }
 
 export class browser {
+  static extension_id(directory) {
+    const normalized = path.resolve(directory).replace(/^[a-z]:/, drive => drive.toUpperCase())
+    return crypto.createHash('sha256').update(normalized, process.platform === 'win32' ? 'utf16le' : 'utf8')
+      .digest('hex').slice(0, 32).replace(/./g, digit => 'abcdefghijklmnop'[parseInt(digit, 16)])
+  }
+
   static find_executable_path() {
     if (process.env.CDP_BROWSER) return process.env.CDP_BROWSER
     const candidates = process.platform === 'win32'
@@ -176,6 +183,15 @@ export class browser {
       args['disable-extensions'] = true
       args['disable-component-extensions-with-background-pages'] = true
     }
+    if (options.cdp_ext) {
+      args['remote-debugging-port'] = false
+      delete args['disable-extensions']
+      delete args['disable-component-extensions-with-background-pages']
+      if (options.extension_path) args['disable-extensions-except'] = [
+        options.extension_path,
+        ...(args['disable-extensions-except'] ?? (options.extensions === true ? ['*'] : [])),
+      ]
+    }
     if (options.images === false) args['blink-settings'] = 'imagesEnabled=false'
     if (options.translations !== true) {
       args['disable-features'].push('Translate', 'TranslateToast', 'EnableTranslatePdf')
@@ -251,7 +267,7 @@ export class browser {
       stdio: ['ignore', 'ignore', 'pipe'],
     })
     let diagnostic = ''
-    const ready = util.on_first(proc, 'ready exit', options.connect_timeout_ms ?? 15000)
+    const ready = util.on_first(proc, options.cdp_ext ? 'spawn exit' : 'ready exit', options.connect_timeout_ms ?? 15000)
     const data = chunk => {
       diagnostic = (diagnostic + chunk).slice(-8192)
       const match = diagnostic.match(/DevTools listening on (ws:\/\/\S+)/)
@@ -342,21 +358,23 @@ export class cdp extends EventTarget {
       hostname,
       port,
     }, request => {
+      const origin = request.headers.get('origin')
       if (request.headers.get('upgrade') !== 'websocket' ||
-          !request.headers.get('origin')?.startsWith('chrome-extension://')) {
+          !origin?.startsWith('chrome-extension://')) {
         return new Response(null, { status: 403 })
       }
       const { socket, response } = Deno.upgradeWebSocket(request)
       socket.addEventListener('message', event => {
-        const name = JSON.parse(event.data).browser
-        if (typeof name !== 'string' || !name || this.reverse_sockets[name]?.readyState < WebSocket.CLOSING) {
-          return socket.close(1008, 'Missing or already connected browser label')
+        const id = JSON.parse(event.data).browser
+        if (id !== origin.slice('chrome-extension://'.length) ||
+            this.reverse_sockets[id]?.readyState < WebSocket.CLOSING) {
+          return socket.close(1008, 'Invalid or already connected extension ID')
         }
-        this.reverse_sockets[name] = socket
+        this.reverse_sockets[id] = socket
         socket.addEventListener('close', () => {
-          if (this.reverse_sockets[name] === socket) delete this.reverse_sockets[name]
+          if (this.reverse_sockets[id] === socket) delete this.reverse_sockets[id]
         })
-        util.emit(this, 'reverse_' + encodeURIComponent(name), socket)
+        util.emit(this, 'reverse_' + encodeURIComponent(id), socket)
       }, { once: true })
       return response
     })
@@ -420,24 +438,36 @@ export class cdp extends EventTarget {
   }
 
   async _connect(record) {
+    if (record.cdp_ext && !this.server) this.listen_reverse()
     let url = record.websocket_url
-    if (record.reverse) {
-      url = this.reverse_sockets[record.name]
-      if (url?.readyState !== WebSocket.OPEN) {
-        url = (await util.on_first(this, 'reverse_' + encodeURIComponent(record.name), record.connect_timeout_ms ?? 15000)).args[0].detail
-      }
-    }
-    if (!url && (record.http_url || record.port)) {
+    if (!record.reverse && !record.cdp_ext && !url && (record.http_url || record.port)) {
       const discovery = new URL(record.http_url || 'http://' + (record.host || '127.0.0.1') + ':' + record.port)
       if (!discovery.pathname.endsWith('/json/version')) discovery.pathname = discovery.pathname.replace(/\/$/, '') + '/json/version'
       const response = await fetch(discovery, { signal: AbortSignal.timeout(record.connect_timeout_ms ?? 15000) })
       if (!response.ok) throw new Error('CDP discovery: HTTP ' + response.status)
       url = (await response.json()).webSocketDebuggerUrl
     }
-    if (!url) {
-      if (record.proc?.exitCode === null && record.proc.signalCode === null) url = record.socket.url
+    if (record.cdp_ext || (!record.reverse && !url)) {
+      if (record.proc?.exitCode === null && record.proc.signalCode === null) url = record.socket?.url
       else {
         const args = browser.build_args(record)
+        if (record.cdp_ext) {
+          record.extension_path = path.resolve(
+            args['user-data-dir'] || path.join(this.base_path, record.name),
+            args['profile-directory'] || 'Default',
+            'cdp_ext',
+          )
+          await fs.mkdir(record.extension_path, { recursive: true })
+          record.extension_path = await fs.realpath(record.extension_path)
+          record.extension_id = browser.extension_id(record.extension_path)
+          const manifest = JSON.parse(await fs.readFile(new URL('./cdp_ext/manifest.json', import.meta.url), 'utf8'))
+          let host = this.server.addr.hostname
+          if (host === '0.0.0.0') host = '127.0.0.1'
+          if (host === '::') host = '::1'
+          manifest.cdp.websocket_url = 'ws://' + (host.includes(':') ? '[' + host + ']' : host) + ':' + this.server.addr.port
+          await fs.writeFile(path.join(record.extension_path, 'manifest.json'), JSON.stringify(manifest))
+          await fs.copyFile(new URL('./cdp_ext/cdp_ext.js', import.meta.url), path.join(record.extension_path, 'cdp_ext.js'))
+        }
         if (args['user-data-dir'] && record.update_preferences !== false) {
           await browser.update_profile_preferences(path.join(args['user-data-dir'], args['profile-directory'] || 'Default', 'Preferences'), {
             'translate.enabled': record.translations === true,
@@ -452,6 +482,13 @@ export class cdp extends EventTarget {
         const launched = await browser.launch(record)
         record.proc = launched.proc
         url = launched.url
+      }
+    }
+    if (record.reverse || record.cdp_ext) {
+      const id = record.extension_id ?? record.name
+      url = this.reverse_sockets[id]
+      if (url?.readyState !== WebSocket.OPEN) {
+        url = (await util.on_first(this, 'reverse_' + encodeURIComponent(id), record.connect_timeout_ms ?? 15000)).args[0].detail
       }
     }
     const socket = record.socket = new jsrpc(url, record)
@@ -576,7 +613,7 @@ export class cdp extends EventTarget {
     if (!record.connecting && record.socket?.readyState !== WebSocket.OPEN) {
       record.connecting = this._connect(record).catch(error => {
         record.socket?.close()
-        record.proc?.kill()
+        if (!record.cdp_ext) record.proc?.kill()
         throw error
       }).finally(() => {
         record.connecting = null
@@ -618,7 +655,7 @@ export class cdp extends EventTarget {
       await Promise.all(Object.values(this.browsers).map(async browser => {
         try {
           await browser.connecting
-          if (browser.proc && browser.socket?.readyState === WebSocket.OPEN) {
+          if (browser.proc && !browser.cdp_ext && browser.socket?.readyState === WebSocket.OPEN) {
             await browser.socket.req({ method: 'Browser.close' })
           }
         } finally {

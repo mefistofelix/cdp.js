@@ -1,8 +1,10 @@
 # TODO
 
 - [x] Add a minimal Chrome extension reverse transport integrated with `cdp.js`:
-  `cdp_ext/` connects to one native Deno WebSocket server, announces the browser
-  label and reuses the existing call/session/event transport. Real headless Chrome
+  `cdp_ext/` connects to one native Deno WebSocket server, announces its native
+  extension ID and reuses the existing call/session/event transport. Managed
+  `cdp_ext: true` launches associate that ID with a logical browser name and keep
+  live processes through transport failures. Real headless Chrome
   tests cover two browsers on the same port without remote-debugging arguments.
 - [ ] Extend the optional browser extension transport to Firefox/Camoufox.
   Enable the extension in a browser profile and control the browser through a
@@ -14,7 +16,7 @@
 
   Investigate before choosing the implementation:
 
-  - Keep the extension-to-server direction and first browser-label announcement
+  - Keep the extension-to-server direction and first instance-ID announcement
     used by the Chrome implementation; one listener serves multiple browsers.
   - A Firefox/Camoufox backend using available extension APIs, with protocol
     translation where needed. Assess WebDriver BiDi or a native bridge if needed;

@@ -24,4 +24,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
       - run: |
           cp cdp.js README.md npm/
+          cp -r cdp_ext npm/
           npx --yes npm@11.20.0 publish ./npm --access public

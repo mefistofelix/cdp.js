@@ -112,6 +112,7 @@ import api, { util, jsrpc, browser, cdp } from './cdp.js'
 | `socket.close()` | Native WebSocket close; does not terminate the browser. |
 | `browser.find_executable_path()` | Synchronously return an executable path from the environment or common locations. |
 | `browser.build_args(options = {})` | Return a fresh, editable object of launch switches. |
+| `browser.extension_id(directory)` | Compute Chromium's path-derived unpacked extension ID. Use the canonical absolute directory without a manifest `key`. |
 | `browser.profile_extension_paths(args)` | Read the effective profile and return a promise for an object keyed by extension ID, with `{ path, enabled }` values for enabled and disabled extensions. |
 | `browser.update_profile_preferences(filename, preferences)` | Update dotted keys in a JSON preferences file; return a promise. |
 | `browser.launch(options)` | Start a local browser and return a promise for `{ proc, url }`. The caller owns the process. |
@@ -223,7 +224,9 @@ local configuration.
 | `request_timeout_ms` | number, `30000` | Default timeout for each protocol request on this browser's socket. |
 | `waitForDebuggerOnStart` | boolean, `false` | Ask Chromium to pause newly auto-attached targets. Applied to `Target.setAutoAttach` when connecting; not a CLI argument or target option. |
 | `websocket_url` | string, unset | Attach directly to a browser WebSocket endpoint. |
-| `reverse` | boolean, `false` | Wait for the extension announcing this browser label instead of launching or discovering a browser. Requires `listen_reverse()` under Deno. |
+| `cdp_ext` | boolean, `false` | Launch with the reverse extension under Deno. Start one shared server automatically if needed, prepare a profile-specific extension copy and wait for its connection. |
+| `reverse` | boolean, `false` | Attach to an externally launched extension instead of launching or discovering a browser. Requires `listen_reverse()` under Deno. |
+| `extension_id` | string, browser name for external reverse attachment | Incoming extension ID to associate with this logical browser. Set automatically for managed `cdp_ext` launches. |
 | `http_url` | string, unset | Discover the endpoint from an HTTP(S) base URL or exact `/json/version` URL. |
 | `port` | number, unset | Discover an existing browser at `http://<host>:<port>/json/version`. |
 | `host` | string, `'127.0.0.1'` | Host used with `port`. |
@@ -255,7 +258,8 @@ arbitrary locations in `PATH`.
 ### Attach to an existing browser
 
 With `reverse: true`, the manager waits for the extension and ignores attachment
-endpoints and launch options. Otherwise, `websocket_url` takes precedence over
+endpoints and launch options. With `cdp_ext: true`, it launches through the extension
+and ignores attachment endpoints. Otherwise, `websocket_url` takes precedence over
 HTTP discovery; `http_url` takes precedence over `host`/`port`. Use one endpoint form:
 
 ```js
@@ -282,7 +286,7 @@ socket and leaves that browser running.
 [cdp_ext/manifest.json](cdp_ext/manifest.json) and
 [cdp_ext/cdp_ext.js](cdp_ext/cdp_ext.js) form a Manifest V3 extension for Chrome
 125+. The extension connects out to one WebSocket server. The server serves all
-browser instances on the same port; each extension announces its browser label
+browser instances on the same port; each extension announces its native ID
 in its first message. No remote-debugging argument is needed.
 
 Run the server under Deno using its native
@@ -291,31 +295,59 @@ Node's direct CDP mode remains supported; `listen_reverse()` under Node rejects
 with an explicit Deno requirement. There is no WebSocket framing implementation,
 third-party server dependency or additional build step.
 
-1. In Chrome, open `chrome://extensions`, enable Developer mode and load unpacked
-   `cdp_ext/`. Alternatively, load this directory before startup using the
-   [local-extension argument options](#local-extensions-at-startup).
-2. Edit the manifest's `cdp` object as needed and reload the extension after changes.
-3. Run `deno run -A examples/reverse.mjs`. The example starts the server, waits
-   up to 60 seconds for `main`, creates a target and evaluates `21 * 2`.
-   Ctrl+C closes the server and detaches the extension's debugger sessions.
+Run `deno run -A examples/reverse.mjs` to launch Chrome with the extension, create
+a target and evaluate `21 * 2`. Ctrl+C closes the owned browser and server.
+The same mode is available per browser:
+
+```js
+const result = await client.call({
+  method: 'Runtime.evaluate',
+  params: {
+    browser: {
+      name: 'work',
+      cdp_ext: true,
+      headless: true,
+    },
+    target: 'demo',
+    expression: '21 * 2',
+  },
+})
+```
+
+The manager copies the two extension files into `cdp_ext/` inside the effective
+profile directory, sets the shared server URL in that copy's manifest and loads
+it before browser startup. Without an effective user-data directory, the copy
+lives under `base_path/<name>/<profile-directory>/` instead (`Default` when unset);
+Chromium still uses its system profile. Profile preferences follow the existing
+`update_preferences` rules.
+The generated launch arguments omit remote debugging and enable this extension.
+An `extensions` array also selects those directories; `extensions: true` keeps
+normally enabled profile extensions through `'*'`. Raw `args` still win and can
+prevent the bridge from loading or connecting, causing a connection timeout.
+
+For external attachment, load unpacked `cdp_ext/` through `chrome://extensions`
+or the [local-extension argument options](#local-extensions-at-startup).
+Use its ID shown in Chrome, or `browser.extension_id(directory)`, as the
+browser option `extension_id`. The logical `name` stays in the manager.
 
 The extension configuration is read from `chrome.runtime.getManifest()`:
 
 | Manifest `cdp` key | Default | Meaning |
 | --- | --- | --- |
 | `websocket_url` | `ws://127.0.0.1:9223` | The shared server endpoint. Port 9223 avoids the usual direct CDP port 9222. |
-| `browser` | `main` | Browser label announced to the server and used in `params.browser`. Choose a different label for each browser instance. |
 | `reconnect_ms` | `5000` | Connection retry interval while the extension worker is awake; also the empty-message heartbeat interval while connected. Use a positive value below 30000. |
 
-For multiple browsers, use a separate configured extension directory for each
-profile, with distinct `cdp.browser` values and the same `cdp.websocket_url`.
-The server rejects an empty/non-string label or a second live connection claiming
-an already connected label. It accepts WebSocket upgrades with a
-`chrome-extension://` origin. The browser label is routing information, not an
-authentication credential.
+The first message uses `chrome.runtime.id`, not a configured logical browser name.
+For an unpacked extension without a manifest `key`, Chromium derives this ID from
+its directory. Managed launches use a separate directory for each profile, so
+the ID is stable across reconnects and restarts, and the manager knows which
+browser it belongs to. External instances must likewise use distinct extension
+directories. Moving the directory changes the ID. The server rejects duplicate
+live IDs and announcements that differ from the WebSocket's `chrome-extension://`
+origin. This is routing information, not an authentication credential.
 
 ```js
-import { cdp } from './cdp.js'
+import { browser, cdp } from './cdp.js'
 
 const client = new cdp({
   reverse: true,
@@ -328,7 +360,11 @@ const server = client.listen_reverse({
 const result = await client.call({
   method: 'Runtime.evaluate',
   params: {
-    browser: 'other',
+    browser: {
+      name: 'other',
+      reverse: true,
+      extension_id: browser.extension_id('/absolute/path/to/cdp_ext'),
+    },
     target: 'demo',
     expression: 'document.title',
   },
@@ -346,12 +382,19 @@ constructor's `reverse` default false and specify `reverse: true` in that browse
 the listening port belongs to `listen_reverse`.
 
 Reverse calls reuse the normal target setup, custom handlers, mappings, routed
-events, request correlation, timeout and error behavior. A reverse browser is
-external: the manager neither launches it nor updates its profile preferences.
-Closing the manager closes the connections/server and detaches debugging while
-leaving browsers and tabs open. The extension retries when the server returns;
+events, request correlation, timeout and error behavior. `reverse: true` alone
+attaches externally: the manager neither launches nor updates that browser.
+`cdp_ext: true` owns the launched process and applies normal launch preferences.
+Closing the manager closes owned processes and the server, while external
+browsers and tabs remain open. The extension retries when the server returns;
 the next call rebuilds discovery and sessions, preserving surviving target IDs.
 Commands interrupted by disconnect are never replayed.
+
+A WebSocket close is not proof that Chrome exited. A managed reverse connection
+loss or connection timeout leaves its owned process alive. Subsequent calls wait
+for that extension to reconnect; they do not spawn another process. Only the
+child process's confirmed exit permits a new launch. Explicit manager `close()`
+still terminates owned browsers.
 
 The [service-worker lifecycle](https://developer.chrome.com/docs/extensions/develop/concepts/service-workers/lifecycle)
 allows termination while offline. A 30-second Chrome alarm wakes the worker for
@@ -361,7 +404,7 @@ These are transport messages, not event buffering or polling of browser state.
 
 ### Reverse protocol and supported commands
 
-The first extension-to-server message is `{ "browser": "main" }`. Subsequent
+The first extension-to-server message is `{ "browser": "<extension ID>" }`. Subsequent
 messages use existing CDP envelopes:
 
 - Request: `{ id, method, params, sessionId? }`.
@@ -1018,7 +1061,8 @@ dictionary containers have a null prototype.
 | `client.options` | Constructor browser defaults, excluding `base_path`. |
 | `client.custom_methods[name]` | Handler function. |
 | `client.browsers[name]` | Browser configuration fields plus live state. |
-| `client.reverse_sockets[name]` | Announced incoming native WebSocket, available even before the first call. |
+| `client.reverse_sockets[extension_id]` | Announced incoming native WebSocket, available even before the first call. |
+| `record.extension_id`, `record.extension_path` | Expected extension identity and the managed copy's canonical directory. |
 | `client.server` | Native Deno reverse `HttpServer`, or unset/null when not listening. |
 | `record.socket` | Current `jsrpc` connection once created. |
 | `record.proc` | Owned child process; absent for external attachment. |
@@ -1070,8 +1114,10 @@ try {
 ```
 
 `browser.launch` builds arguments, starts the process, reads the
-DevTools WebSocket URL from stderr and returns `{ proc, url }`. It does not open
-a CDP connection or write preference files; `update_preferences`, `preferences`
+DevTools WebSocket URL from stderr and returns `{ proc, url }`. With `cdp_ext: true`,
+it waits for process spawn instead and returns `url: undefined`; the caller must
+prepare the extension and supply its directory as `extension_path`.
+It does not open a CDP connection or write preference files; `update_preferences`, `preferences`
 and `local_state` are manager options, ignored by this helper.
 To prepare files independently, call
 `browser.update_profile_preferences` explicitly before launch. The helper does
@@ -1133,8 +1179,8 @@ workflow for detecting new conversations and extracting connector session handle
 from tool-call history. It is a caller-side recipe, not additional library API.
 
 For npm packaging, account setup, and GitHub publishing, see
-[Publishing](npm/PUBLISHING.md). Publishing only copies `cdp.js` and this README
-into `npm/` alongside its manifest; no build script is needed.
+[Publishing](npm/PUBLISHING.md). Publishing copies `cdp.js`, this README and the
+two `cdp_ext/` files into `npm/` alongside its manifest; no build script is needed.
 
 ```sh
 node --check cdp.js
@@ -1148,5 +1194,7 @@ library use needs no build or package installation; npm packaging is optional.
 The Deno test loads the real extension into two headless Chrome instances on one
 server port without remote-debugging arguments. It checks native/custom calls,
 Network events, bindings, child sessions, reconnect, detach/recreate and isolation.
-The extension sources live in the repository; the npm tarball remains limited to
-`package.json`, `cdp.js` and `README.md`.
+Managed-launch coverage checks concurrent first use, profile-specific identity,
+connection timeout without process replacement and relaunch after confirmed exit.
+The npm tarball contains `package.json`, `cdp.js`, `README.md` and the two extension
+files required by managed reverse launches.
