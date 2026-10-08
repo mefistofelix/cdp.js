@@ -195,7 +195,7 @@ export class browser {
   }
 
   static async profile_extension_paths(args) {
-    if (!args['user-data-dir']) throw new Error('Expanding extension * requires user-data-dir')
+    if (!args['user-data-dir']) throw new Error('Reading profile extensions requires user-data-dir')
     const profile = path.join(args['user-data-dir'], args['profile-directory'] || 'Default')
     const settings = {}
     for (const filename of ['Preferences', 'Secure Preferences']) {
@@ -205,11 +205,15 @@ export class browser {
       })
       Object.assign(settings, JSON.parse(content).extensions?.settings)
     }
-    return Object.values(settings)
-      .filter(extension => extension.path && ![5, 10].includes(extension.location))
-      .filter(extension => extension.state !== 0 &&
-        !(Array.isArray(extension.disable_reasons) ? extension.disable_reasons.length : extension.disable_reasons))
-      .map(extension => path.isAbsolute(extension.path) ? extension.path : path.join(profile, 'Extensions', extension.path))
+    for (const [id, extension] of Object.entries(settings)) {
+      if (!extension.path || [5, 10].includes(extension.location)) delete settings[id]
+      else settings[id] = {
+        path: path.isAbsolute(extension.path) ? extension.path : path.join(profile, 'Extensions', extension.path),
+        enabled: extension.state !== 0 &&
+          !(Array.isArray(extension.disable_reasons) ? extension.disable_reasons.length : extension.disable_reasons),
+      }
+    }
+    return settings
   }
 
   static async update_profile_preferences(filename, preferences) {
@@ -232,7 +236,8 @@ export class browser {
     const args = browser.build_args(options)
     const extensions = args['disable-extensions-except']
     if (extensions && extensions.includes('*')) {
-      const installed = await browser.profile_extension_paths(args)
+      const installed = Object.values(await browser.profile_extension_paths(args))
+        .filter(extension => extension.enabled).map(extension => extension.path)
       args['disable-extensions-except'] = [...new Set(extensions.flatMap(directory =>
         directory === '*' ? installed : directory,
       ))]

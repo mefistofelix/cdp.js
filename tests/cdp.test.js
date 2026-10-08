@@ -499,17 +499,17 @@ test('profile extension discovery uses current records and preserves preference 
     },
     'extensions.settings.disabled': {
       location: 4,
-      path: '/disabled',
+      path: path.join(directory, 'disabled'),
       disable_reasons: [1],
     },
     'extensions.settings.legacy_disabled': {
       location: 4,
-      path: '/legacy-disabled',
+      path: path.join(directory, 'legacy-disabled'),
       state: 0,
     },
     'extensions.settings.legacy_reasons': {
       location: 4,
-      path: '/legacy-reasons',
+      path: path.join(directory, 'legacy-reasons'),
       disable_reasons: 1,
     },
     'extensions.settings.component': {
@@ -522,12 +522,30 @@ test('profile extension discovery uses current records and preserves preference 
     'user-data-dir': directory,
     'profile-directory': 'Profile 1',
   }
-  assert.deepEqual(await browser.profile_extension_paths(args), [
-    path.join(profile, 'Extensions', 'installed/2.0_0'),
-    directory,
-  ])
+  assert.deepEqual(await browser.profile_extension_paths(args), {
+    installed: {
+      path: path.join(profile, 'Extensions', 'installed/2.0_0'),
+      enabled: true,
+    },
+    unpacked: {
+      path: directory,
+      enabled: true,
+    },
+    disabled: {
+      path: path.join(directory, 'disabled'),
+      enabled: false,
+    },
+    legacy_disabled: {
+      path: path.join(directory, 'legacy-disabled'),
+      enabled: false,
+    },
+    legacy_reasons: {
+      path: path.join(directory, 'legacy-reasons'),
+      enabled: false,
+    },
+  })
   assert.equal(await fs.readFile(secure, 'utf8'), before)
-  assert.deepEqual(await browser.profile_extension_paths({ 'user-data-dir': directory }), [])
+  assert.deepEqual(await browser.profile_extension_paths({ 'user-data-dir': directory }), {})
   await assert.rejects(browser.profile_extension_paths({}), /requires user-data-dir/)
   await fs.writeFile(secure, '{invalid')
   await assert.rejects(browser.profile_extension_paths(args), SyntaxError)

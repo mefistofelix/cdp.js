@@ -159,9 +159,11 @@ on success, timeout and disconnect.
   commands or additional cross-layer reconciliation.
   `browser.launch` expands exact `'*'` entries before spawn through
   `browser.profile_extension_paths(args)`. Read current paths from `Preferences`
-  and `Secure Preferences`, with secure records taking precedence per ID. Include
-  only enabled records, including external unpacked directories; exclude disable
-  reasons, legacy disabled state and internal component locations. Do not scan
+  and `Secure Preferences`, with secure records taking precedence per ID. Return
+  a plain object keyed by extension ID with `{ path, enabled }` values, including
+  disabled records and external unpacked directories. Derive enabled status from
+  disable reasons and legacy state; omit internal components and missing paths.
+  Wildcard expansion selects only enabled entries from that same object. Do not scan
   obsolete versions or change extension preference records. Use effective raw
   directory arguments and require a directory for wildcard expansion; do not
   infer the system profile. Preserve caller arrays, and propagate malformed JSON

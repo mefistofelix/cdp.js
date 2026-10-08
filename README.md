@@ -107,7 +107,7 @@ import api, { util, jsrpc, browser, cdp } from './cdp.js'
 | `socket.close()` | Native WebSocket close; does not terminate the browser. |
 | `browser.find_executable_path()` | Synchronously return an executable path from the environment or common locations. |
 | `browser.build_args(options = {})` | Return a fresh, editable object of launch switches. |
-| `browser.profile_extension_paths(args)` | Read the effective profile's extension records and return a promise for enabled extension directories. |
+| `browser.profile_extension_paths(args)` | Read the effective profile and return a promise for an object keyed by extension ID, with `{ path, enabled }` values for enabled and disabled extensions. |
 | `browser.update_profile_preferences(filename, preferences)` | Update dotted keys in a JSON preferences file; return a promise. |
 | `browser.launch(options)` | Start a local browser and return a promise for `{ proc, url }`. The caller owns the process. |
 | `util.normalize_xpath(xpath)` | Return an XPath string with the supported rewrites. |
@@ -440,13 +440,25 @@ normal extensions. Arrays passed by the caller are not mutated.
 `browser.build_args` leaves `'*'` unexpanded. `browser.launch` reads
 `<user-data-dir>/<profile-directory or Default>/Preferences` and `Secure Preferences`
 before spawning, using the final raw directory arguments. Secure records take
-precedence for duplicate IDs. Discovery uses the recorded current path, including
-absolute unpacked paths; it does not scan obsolete versions or activate disabled
-extensions. Disable reasons and legacy disabled state exclude entries; internal
-component extensions are not added to the list. Missing files contribute no
+precedence for duplicate IDs. `browser.profile_extension_paths(args)` returns a
+plain object keyed by extension ID, containing both enabled and disabled records
+as `{ path, enabled }`. Paths refer to the current recorded version, including
+absolute unpacked paths. Disable reasons and legacy disabled state set
+`enabled: false`; internal component extensions and records without a path are
+omitted. Wildcard expansion takes only the entries with `enabled: true`, without
+scanning obsolete versions or activating disabled extensions. Missing files contribute no
 entries; malformed JSON and other read errors reject launch. `'*'` requires an
 explicit effective user-data directory; the system directory is not inferred.
 `update_preferences: false` does not disable this read-only expansion.
+
+```js
+const extensions = await browser.profile_extension_paths({
+  'user-data-dir': '/absolute/path/to/profile-root',
+  'profile-directory': 'Default',
+})
+// extensions[extensionId] contains { path, enabled }.
+const disabled = Object.entries(extensions).filter(([, extension]) => !extension.enabled)
+```
 
 Explicit directories must contain unpacked extensions with `manifest.json`.
 The native argument excludes other normal extensions, so include `'*'` when
