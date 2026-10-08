@@ -217,6 +217,19 @@ Deno.test('reverse extension controls real Chrome without remote-debugging argum
     assert.notEqual(record.socket, client.browsers.other.socket)
     assert.equal(Object.keys(client.reverse_sockets).length, 2)
     assert.equal((await call('Runtime.evaluate', { expression: 'typeof window.marker' })).result.value, 'undefined')
+    const shared = client.server
+    const main_closed = util.on_first(client, 'close')
+    record.socket.close()
+    await main_closed
+    assert.equal(client.server, shared, 'another reverse connection still needs the shared listener')
+    assert.equal((await client.call({
+      method: 'Runtime.evaluate',
+      params: {
+        browser: 'other',
+        target: 'page',
+        expression: 'window.marker',
+      },
+    })).result.value, 'other')
     await client.close()
     assert.equal(proc.exitCode, null, 'manager leaves externally launched Chrome alive')
     assert.equal(other_proc.exitCode, null)
@@ -236,10 +249,18 @@ Deno.test('managed reverse launch uses extension identity and keeps a live proce
     base_path: directory,
     headless: true,
     connect_timeout_ms: 20000,
+    reverse_server: { port: 0 },
   })
-  client.listen_reverse({ port: 0 })
+  assert.equal(client.server, undefined, 'constructor does not listen')
   let exited
+  let direct_exited
   try {
+    await client.call({
+      method: 'Browser.getVersion',
+      params: { browser: 'direct' },
+    })
+    direct_exited = once(client.browsers.direct.proc, 'exit')
+    assert.equal(client.server, undefined, 'direct browsers do not start the reverse listener')
     const spec = {
       name: 'work',
       cdp_ext: true,
@@ -259,6 +280,7 @@ Deno.test('managed reverse launch uses extension identity and keeps a live proce
     const results = await Promise.all([call(), call()])
     assert.deepEqual(results.map(result => result.result.value), [42, 42])
     const record = client.browsers.work
+    const server = client.server
     const original = record.proc
     exited = once(original, 'exit')
     const id = record.extension_id
@@ -278,16 +300,52 @@ Deno.test('managed reverse launch uses extension identity and keeps a live proce
     record.connect_timeout_ms = 20000
     assert.equal((await call()).result.value, 42)
     assert.equal(record.proc, original, 'extension reconnect reuses the live process')
+    assert.equal(client.server, server, 'a live reverse process still needs the listener')
     const disconnected = util.on_first(client, 'close')
     original.kill()
     await exited
     await disconnected
+    await server.finished
+    await client.server_closing
+    assert.equal(client.server, null, 'last reverse process exit releases the listener')
+    assert.equal(client.browsers.direct.proc.exitCode, null, 'a direct browser does not retain the reverse listener')
+    assert.match((await client.call({
+      method: 'Browser.getVersion',
+      params: { browser: 'direct' },
+    })).product, /Chrome/)
     assert.equal((await call()).result.value, 42)
+    assert.notEqual(client.server, server, 'a later reverse call restarts the listener')
     assert.notEqual(record.proc, original, 'only confirmed process exit permits relaunch')
     assert.equal(record.extension_id, id, 'extension identity survives a browser relaunch')
     exited = once(record.proc, 'exit')
   } finally {
     await client.close()
     await exited
+    await direct_exited
+  }
+})
+
+Deno.test('an external reverse wait starts lazily and releases the listener after timeout', async () => {
+  const client = new cdp({
+    reverse: true,
+    reverse_server: { port: 0 },
+    connect_timeout_ms: 30,
+  })
+  assert.equal(client.server, undefined)
+  try {
+    await assert.rejects(client.call({ method: 'Browser.getVersion' }), /abort/i)
+    assert.equal(client.server, null)
+    const port = client.reverse_server.port
+    assert.ok(port > 0, 'first reverse use allocated a listening port')
+    const probe = Deno.listen({
+      hostname: '127.0.0.1',
+      port,
+    })
+    probe.close()
+    await assert.rejects(client.call({ method: 'Browser.getVersion' }), /abort/i)
+    assert.equal(client.reverse_server.port, port, 'restart keeps the endpoint used by extensions')
+    assert.equal(client.server, null)
+  } finally {
+    await client.close()
   }
 })

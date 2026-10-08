@@ -59,6 +59,15 @@ string rewrite belongs to `util`.
 the same request methods and event correlation. Do not duplicate this transport
 for reverse connections. Empty text is a heartbeat, not a JSON message.
 `cdp.listen_reverse` owns one native Deno server for all incoming extensions.
+Start it lazily at the first reverse or extension-mode browser call; construction
+and direct CDP calls do not listen. Constructor-only `reverse_server` settings
+belong to the manager, not browser defaults. Keep the effective port for restarts,
+including an initially allocated port zero. Explicit `listen_reverse` still allows
+starting ahead of a browser call. Stop the listener when no live reverse socket,
+pending reverse initialization or live owned reverse process needs it. Direct
+browsers do not retain it. Process exits, socket closes and initialization
+settlement trigger the idle check. Wait for `server_closing` before restarting;
+never bind the replacement while the previous listener is still shutting down.
 The first JSON message announces `{ browser: chrome.runtime.id }`; do not assign
 separate ports or URL paths per browser or put logical names in the manifest.
 `reverse_sockets` is a public object keyed by extension ID. Validate it against
@@ -162,7 +171,8 @@ control generated flags/preferences; raw `args` and `preferences` override their
 respective generated values independently. There is no cross-layer conflict
 resolver. Do not add one implicitly or silently change defaults while refactoring.
 
-Constructor options supply browser defaults, not target defaults. Per-browser
+Constructor options supply browser defaults, not target defaults, except the
+manager-only `base_path` and `reverse_server`. Per-browser
 `args`/`preferences`/`local_state` use shallow key merges; arrays replace rather
 than concatenate.
 Configuration objects are applied on first use of a label, not on every call.

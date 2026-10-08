@@ -207,6 +207,7 @@ local configuration.
 | Option | Type / default | Meaning |
 | --- | --- | --- |
 | `base_path` | string, `'.cdp'` | Constructor-only profile root, resolved against the working directory. |
+| `reverse_server` | object, `{}` | Constructor-only settings for the shared lazy listener: `hostname` defaults to `'127.0.0.1'`, `port` to `9223`. Independent of browser attachment `host`/`port`. |
 | `name` | string, `'main'` when routing is omitted | Required in a browser configuration object; dictionary key and default profile directory label. |
 | `user_data_dir` | absolute path string or `null`, `<base_path>/<name>` | Chromium user-data directory containing profiles such as `Default`. Explicit paths should be absolute. `null` omits the switch and skips manager preference-file writes; Chromium selects its system directory. |
 | `executable_path` | string, automatic discovery | Executable to spawn; takes precedence over `CDP_BROWSER`. |
@@ -225,7 +226,7 @@ local configuration.
 | `waitForDebuggerOnStart` | boolean, `false` | Ask Chromium to pause newly auto-attached targets. Applied to `Target.setAutoAttach` when connecting; not a CLI argument or target option. |
 | `websocket_url` | string, unset | Attach directly to a browser WebSocket endpoint. |
 | `cdp_ext` | boolean, `false` | Launch with the reverse extension under Deno. Start one shared server automatically if needed, prepare a profile-specific extension copy and wait for its connection. |
-| `reverse` | boolean, `false` | Attach to an externally launched extension instead of launching or discovering a browser. Requires `listen_reverse()` under Deno. |
+| `reverse` | boolean, `false` | Attach to an externally launched extension instead of launching or discovering a browser. Starts the shared listener on first use under Deno. |
 | `extension_id` | string, browser name for external reverse attachment | Incoming extension ID to associate with this logical browser. Set automatically for managed `cdp_ext` launches. |
 | `http_url` | string, unset | Discover the endpoint from an HTTP(S) base URL or exact `/json/version` URL. |
 | `port` | number, unset | Discover an existing browser at `http://<host>:<port>/json/version`. |
@@ -352,10 +353,10 @@ import { browser, cdp } from './cdp.js'
 const client = new cdp({
   reverse: true,
   connect_timeout_ms: 60000,
-})
-const server = client.listen_reverse({
-  hostname: '127.0.0.1',
-  port: 9223,
+  reverse_server: {
+    hostname: '127.0.0.1',
+    port: 9223,
+  },
 })
 const result = await client.call({
   method: 'Runtime.evaluate',
@@ -373,13 +374,29 @@ console.log(result.result.value)
 await client.close()
 ```
 
-`listen_reverse` defaults to `hostname: '127.0.0.1'` and `port: 9223`; it returns
-the native Deno `HttpServer` and stores it in `client.server`. `port: 0` lets the
-OS allocate a port, available in `server.addr.port`. Calling it while this manager
-already has a server rejects. To mix direct and reverse browsers, leave the
+Construction and direct CDP calls do not start a listener. The first browser call
+using `reverse: true` or `cdp_ext: true` starts the shared server lazily, with the
+constructor's `reverse_server` settings. To mix direct and reverse browsers, leave the
 constructor's `reverse` default false and specify `reverse: true` in that browser's
-`params.browser` object. Constructor `port` remains a direct attachment option;
-the listening port belongs to `listen_reverse`.
+`params.browser` object. Constructor `port` remains a direct attachment option.
+
+The listener closes when no reverse connection, pending reverse initialization
+or live owned reverse process needs it. A live owned browser keeps it available
+through temporary disconnects. External disconnects can release it when nothing
+else needs it; the next reverse call restarts it and waits for the extension's
+retry. Direct browsers do not keep this listener alive.
+
+`client.reverse_server` is the public shared configuration object. After startup
+it contains the effective listening port, including when `port: 0` originally
+requested an available port. Restarts reuse that port so existing extensions can
+still reconnect. `client.server` contains the current native Deno `HttpServer`,
+or is unset/null while stopped. A call arriving during shutdown waits for it to
+finish before starting a replacement server.
+
+`listen_reverse(options = client.reverse_server)` remains available to start the
+listener explicitly ahead of a browser call. It returns the native `HttpServer`;
+calling it while a server is running rejects. Explicit options replace the stored
+settings, with omitted fields taking the hostname/port defaults above.
 
 Reverse calls reuse the normal target setup, custom handlers, mappings, routed
 events, request correlation, timeout and error behavior. `reverse: true` alone
@@ -1058,12 +1075,14 @@ dictionary containers have a null prototype.
 | Path | Contents |
 | --- | --- |
 | `client.base_path` | Resolved profile root. |
-| `client.options` | Constructor browser defaults, excluding `base_path`. |
+| `client.options` | Constructor browser defaults, excluding `base_path` and `reverse_server`. |
+| `client.reverse_server` | Shared listener configuration; the effective hostname/port are stored after startup. |
 | `client.custom_methods[name]` | Handler function. |
 | `client.browsers[name]` | Browser configuration fields plus live state. |
 | `client.reverse_sockets[extension_id]` | Announced incoming native WebSocket, available even before the first call. |
 | `record.extension_id`, `record.extension_path` | Expected extension identity and the managed copy's canonical directory. |
-| `client.server` | Native Deno reverse `HttpServer`, or unset/null when not listening. |
+| `client.server` | Current native Deno reverse `HttpServer`, or unset/null when not listening. |
+| `client.server_closing` | Shutdown promise while the reverse listener is stopping, otherwise unset/null. |
 | `record.socket` | Current `jsrpc` connection once created. |
 | `record.proc` | Owned child process; absent for external attachment. |
 | `record.connecting` | In-progress connection promise, cleared after settlement. |
@@ -1195,6 +1214,8 @@ The Deno test loads the real extension into two headless Chrome instances on one
 server port without remote-debugging arguments. It checks native/custom calls,
 Network events, bindings, child sessions, reconnect, detach/recreate and isolation.
 Managed-launch coverage checks concurrent first use, profile-specific identity,
-connection timeout without process replacement and relaunch after confirmed exit.
+connection timeout without process replacement, lazy listener startup/shutdown
+independent of direct browsers, and relaunch after confirmed exit. External reverse
+timeouts release the listening port; other live reverse connections retain it.
 The npm tarball contains `package.json`, `cdp.js`, `README.md` and the two extension
 files required by managed reverse launches.

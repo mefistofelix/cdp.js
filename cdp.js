@@ -339,10 +339,11 @@ const custom_methods = {
 }
 
 export class cdp extends EventTarget {
-  constructor({ base_path = '.cdp', ...options } = {}) {
+  constructor({ base_path = '.cdp', reverse_server = {}, ...options } = {}) {
     super()
     this.base_path = path.resolve(base_path)
     this.options = options
+    this.reverse_server = { ...reverse_server }
     this.browsers = Object.create(null)
     this.reverse_sockets = Object.create(null)
     this.custom_methods = { ...custom_methods }
@@ -351,10 +352,10 @@ export class cdp extends EventTarget {
   listen_reverse({
     hostname = '127.0.0.1',
     port = 9223,
-  } = {}) {
+  } = this.reverse_server) {
     if (!globalThis.Deno) throw new Error('The reverse WebSocket server requires Deno')
     if (this.server) throw new Error('Reverse server is already listening')
-    return this.server = Deno.serve({
+    this.server = Deno.serve({
       hostname,
       port,
     }, request => {
@@ -373,10 +374,30 @@ export class cdp extends EventTarget {
         this.reverse_sockets[id] = socket
         socket.addEventListener('close', () => {
           if (this.reverse_sockets[id] === socket) delete this.reverse_sockets[id]
+          this._close_reverse_if_idle()
         })
         util.emit(this, 'reverse_' + encodeURIComponent(id), socket)
       }, { once: true })
       return response
+    })
+    this.reverse_server = {
+      hostname,
+      port: this.server.addr.port,
+    }
+    return this.server
+  }
+
+  _close_reverse_if_idle() {
+    if (this.server_closing) return this.server_closing
+    if (!this.server || Object.values(this.reverse_sockets).some(socket => socket.readyState < WebSocket.CLOSING)) return
+    for (const record of Object.values(this.browsers)) {
+      if (!record.reverse && !record.cdp_ext) continue
+      if (record.connecting) return
+      if (record.proc?.exitCode === null && record.proc.signalCode === null) return
+    }
+    return this.server_closing = this.server.shutdown().finally(() => {
+      this.server = null
+      this.server_closing = null
     })
   }
 
@@ -438,7 +459,10 @@ export class cdp extends EventTarget {
   }
 
   async _connect(record) {
-    if (record.cdp_ext && !this.server) this.listen_reverse()
+    if (record.reverse || record.cdp_ext) {
+      await this.server_closing
+      if (!this.server) this.listen_reverse()
+    }
     let url = record.websocket_url
     if (!record.reverse && !record.cdp_ext && !url && (record.http_url || record.port)) {
       const discovery = new URL(record.http_url || 'http://' + (record.host || '127.0.0.1') + ':' + record.port)
@@ -481,6 +505,7 @@ export class cdp extends EventTarget {
         }
         const launched = await browser.launch(record)
         record.proc = launched.proc
+        if (record.cdp_ext) record.proc.once('exit', () => this._close_reverse_if_idle())
         url = launched.url
       }
     }
@@ -615,8 +640,9 @@ export class cdp extends EventTarget {
         record.socket?.close()
         if (!record.cdp_ext) record.proc?.kill()
         throw error
-      }).finally(() => {
+      }).finally(async () => {
         record.connecting = null
+        await this._close_reverse_if_idle()
       })
     }
     await record.connecting
@@ -667,8 +693,7 @@ export class cdp extends EventTarget {
       this.browsers = Object.create(null)
       for (const socket of Object.values(this.reverse_sockets)) socket.close()
       this.reverse_sockets = Object.create(null)
-      await this.server?.shutdown()
-      this.server = null
+      await this._close_reverse_if_idle()
     }
   }
 }
