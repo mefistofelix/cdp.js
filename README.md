@@ -413,6 +413,21 @@ for that extension to reconnect; they do not spawn another process. Only the
 child process's confirmed exit permits a new launch. Explicit manager `close()`
 still terminates owned browsers.
 
+The current reverse registration uses a profile-specific extension copy. It does
+not assign a new logical name to an already running Chrome using a shared extension
+directory. Unpacked `chrome.runtime.id` identifies the extension path, not the
+user-data directory or browser executable. Shared-path registration and URL-based
+bootstrap are tracked in [TODO.md](TODO.md), not implemented behavior.
+
+Chrome's [process singleton](https://github.com/chromium/chromium/blob/main/chrome/browser/process_singleton.h)
+uses the user-data directory to decide whether to forward a new launch to an
+existing instance. `no-default-browser-check` only suppresses the default-browser
+prompt. The current Chromium [notification callback](https://github.com/chromium/chromium/blob/main/chrome/browser/chrome_browser_main.cc)
+rejects forwarding when either command line enables automation or uses headless
+mode. This library generates `enable-automation` by default; a normal browser
+started with `args['enable-automation']: false` can behave differently. Do not
+infer ownership of the real browser from a short-lived forwarding process.
+
 The [service-worker lifecycle](https://developer.chrome.com/docs/extensions/develop/concepts/service-workers/lifecycle)
 allows termination while offline. A 30-second Chrome alarm wakes the worker for
 another connection attempt; the configured interval applies while it is awake.
