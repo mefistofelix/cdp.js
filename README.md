@@ -1,6 +1,7 @@
 # cdp.js
 
-A low-level Chromium DevTools Protocol library for Node.js. One ES module,
+A low-level Chromium DevTools Protocol library for Node.js, with an optional
+native Deno server for Chrome extension reverse connections. One ES module,
 standard-library imports, no runtime dependencies or root `package.json`.
 
 Use Node.js 22.19+ and an installed Chrome, Chromium or Edge. Import `cdp.js`
@@ -26,6 +27,8 @@ below remain supported. Publication metadata is isolated in `npm/`.
 - Native CDP requests through `call({ method, params })`, with native results.
 - Named browsers and targets, created and connected on demand.
 - Attachment through WebSocket, HTTP discovery or a debugging port.
+- Optional Chrome extension reverse connections through one native Deno server,
+  without browser remote-debugging arguments.
 - Shared initialization for concurrent calls; reconnection and target recreation
   on subsequent use, without replaying failed commands.
 - Public object mappings and directly replaceable custom method handlers.
@@ -37,7 +40,8 @@ below remain supported. Publication metadata is isolated in `npm/`.
 There is no Page class, batch API, image-processing helper, event buffer/filter
 API or database. Browser, target and session mappings live in memory. Chromium
 profiles and their preferences are ordinary files on disk. Any native CDP method
-supported by the connected browser remains available through `call`.
+supported by the connected browser remains available through direct `call`.
+The optional extension transport has the command/domain limits documented below.
 
 ## Quick start
 
@@ -100,8 +104,9 @@ import api, { util, jsrpc, browser, cdp } from './cdp.js'
 | `new cdp(options = {})` | Create a manager; does not launch a browser yet. |
 | `client.call({ method, params = {} })` | Resolve routing and return a promise for the native CDP result, or a custom handler's result. |
 | `client.evaluate_xpath(params, fn, options)` | Execute a serialized function with a normalized XPath in a target; return the native `Runtime.evaluate` result. |
-| `client.close()` | Close owned browser processes, disconnect attached browsers, then clear `client.browsers`. Profile directories remain. |
-| `new jsrpc(url, options = {})` | Open a raw WebSocket JSON-RPC connection. |
+| `client.close()` | Close owned processes, disconnect attached/reverse browsers, stop the reverse server and clear browser/socket mappings. Profiles and external browsers remain. |
+| `new jsrpc(urlOrSocket, options = {})` | Open a raw WebSocket JSON-RPC connection or equip an accepted native WebSocket with the same RPC methods. |
+| `client.listen_reverse(options = {})` | Start the native Deno WebSocket server; returns its `HttpServer`. |
 | `socket.req(request, timeout_ms)` | Assign a request ID and await its native result. |
 | `socket.notify(request)` | Serialize and send a raw message; no ID allocation or response wait. |
 | `socket.close()` | Native WebSocket close; does not terminate the browser. |
@@ -218,6 +223,7 @@ local configuration.
 | `request_timeout_ms` | number, `30000` | Default timeout for each protocol request on this browser's socket. |
 | `waitForDebuggerOnStart` | boolean, `false` | Ask Chromium to pause newly auto-attached targets. Applied to `Target.setAutoAttach` when connecting; not a CLI argument or target option. |
 | `websocket_url` | string, unset | Attach directly to a browser WebSocket endpoint. |
+| `reverse` | boolean, `false` | Wait for the extension announcing this browser label instead of launching or discovering a browser. Requires `listen_reverse()` under Deno. |
 | `http_url` | string, unset | Discover the endpoint from an HTTP(S) base URL or exact `/json/version` URL. |
 | `port` | number, unset | Discover an existing browser at `http://<host>:<port>/json/version`. |
 | `host` | string, `'127.0.0.1'` | Host used with `port`. |
@@ -248,8 +254,9 @@ arbitrary locations in `PATH`.
 
 ### Attach to an existing browser
 
-`websocket_url` takes precedence over HTTP discovery; `http_url` takes precedence
-over `host`/`port`. Use one endpoint form:
+With `reverse: true`, the manager waits for the extension and ignores attachment
+endpoints and launch options. Otherwise, `websocket_url` takes precedence over
+HTTP discovery; `http_url` takes precedence over `host`/`port`. Use one endpoint form:
 
 ```js
 await client.call({
@@ -269,6 +276,127 @@ socket and leaves that browser running.
 
 `port: 9222` means **attach**. To **launch** on that port, use
 `args: { 'remote-debugging-port': 9222 }` without an attachment endpoint.
+
+## Reverse Chrome extension transport
+
+[cdp_ext/manifest.json](cdp_ext/manifest.json) and
+[cdp_ext/cdp_ext.js](cdp_ext/cdp_ext.js) form a Manifest V3 extension for Chrome
+125+. The extension connects out to one WebSocket server. The server serves all
+browser instances on the same port; each extension announces its browser label
+in its first message. No remote-debugging argument is needed.
+
+Run the server under Deno using its native
+[WebSocket upgrade](https://docs.deno.com/api/deno/websockets/).
+Node's direct CDP mode remains supported; `listen_reverse()` under Node rejects
+with an explicit Deno requirement. There is no WebSocket framing implementation,
+third-party server dependency or additional build step.
+
+1. In Chrome, open `chrome://extensions`, enable Developer mode and load unpacked
+   `cdp_ext/`. Alternatively, load this directory before startup using the
+   [local-extension argument options](#local-extensions-at-startup).
+2. Edit the manifest's `cdp` object as needed and reload the extension after changes.
+3. Run `deno run -A examples/reverse.mjs`. The example starts the server, waits
+   up to 60 seconds for `main`, creates a target and evaluates `21 * 2`.
+   Ctrl+C closes the server and detaches the extension's debugger sessions.
+
+The extension configuration is read from `chrome.runtime.getManifest()`:
+
+| Manifest `cdp` key | Default | Meaning |
+| --- | --- | --- |
+| `websocket_url` | `ws://127.0.0.1:9223` | The shared server endpoint. Port 9223 avoids the usual direct CDP port 9222. |
+| `browser` | `main` | Browser label announced to the server and used in `params.browser`. Choose a different label for each browser instance. |
+| `reconnect_ms` | `5000` | Connection retry interval while the extension worker is awake; also the empty-message heartbeat interval while connected. Use a positive value below 30000. |
+
+For multiple browsers, use a separate configured extension directory for each
+profile, with distinct `cdp.browser` values and the same `cdp.websocket_url`.
+The server rejects an empty/non-string label or a second live connection claiming
+an already connected label. It accepts WebSocket upgrades with a
+`chrome-extension://` origin. The browser label is routing information, not an
+authentication credential.
+
+```js
+import { cdp } from './cdp.js'
+
+const client = new cdp({
+  reverse: true,
+  connect_timeout_ms: 60000,
+})
+const server = client.listen_reverse({
+  hostname: '127.0.0.1',
+  port: 9223,
+})
+const result = await client.call({
+  method: 'Runtime.evaluate',
+  params: {
+    browser: 'other',
+    target: 'demo',
+    expression: 'document.title',
+  },
+})
+console.log(result.result.value)
+await client.close()
+```
+
+`listen_reverse` defaults to `hostname: '127.0.0.1'` and `port: 9223`; it returns
+the native Deno `HttpServer` and stores it in `client.server`. `port: 0` lets the
+OS allocate a port, available in `server.addr.port`. Calling it while this manager
+already has a server rejects. To mix direct and reverse browsers, leave the
+constructor's `reverse` default false and specify `reverse: true` in that browser's
+`params.browser` object. Constructor `port` remains a direct attachment option;
+the listening port belongs to `listen_reverse`.
+
+Reverse calls reuse the normal target setup, custom handlers, mappings, routed
+events, request correlation, timeout and error behavior. A reverse browser is
+external: the manager neither launches it nor updates its profile preferences.
+Closing the manager closes the connections/server and detaches debugging while
+leaving browsers and tabs open. The extension retries when the server returns;
+the next call rebuilds discovery and sessions, preserving surviving target IDs.
+Commands interrupted by disconnect are never replayed.
+
+The [service-worker lifecycle](https://developer.chrome.com/docs/extensions/develop/concepts/service-workers/lifecycle)
+allows termination while offline. A 30-second Chrome alarm wakes the worker for
+another connection attempt; the configured interval applies while it is awake.
+Connected empty-text heartbeats keep an otherwise idle WebSocket worker active.
+These are transport messages, not event buffering or polling of browser state.
+
+### Reverse protocol and supported commands
+
+The first extension-to-server message is `{ "browser": "main" }`. Subsequent
+messages use existing CDP envelopes:
+
+- Request: `{ id, method, params, sessionId? }`.
+- Response: `{ id, result }` or `{ id, error: { code, message } }`.
+- Notification: `{ method, params, sessionId? }`.
+- Empty text: heartbeat, ignored by `jsrpc`.
+
+Top-level target IDs are stringified Chrome tab IDs. Root session IDs are generated
+per attachment; flattened child session IDs include the root ID and native child
+session ID. Treat all session IDs as opaque strings. Target labels remain manager
+configuration; they are not added to raw protocol notifications.
+
+The extension adapts browser-level `Target.getTargets`, `getTargetInfo`,
+`setDiscoverTargets`, `setAutoAttach`, `createTarget`, `attachToTarget`,
+`detachFromTarget`, `closeTarget` and `activateTarget` to Chrome tab/debugger APIs.
+Discovery lists tabs; attaching a selected tab exposes its native child target
+events and flattened sessions. It does not attach every unselected tab.
+`createTarget` accepts only `url` and `background`; `activateTarget` selects the
+tab and focuses its window. `Browser.getVersion` returns product/user-agent data;
+its protocol version is `1.3`, with empty `revision` and `jsVersion` fields.
+Other browser-level commands return explicit unsupported-command errors.
+
+Target/session commands go through
+[chrome.debugger](https://developer.chrome.com/docs/extensions/reference/api/debugger),
+which supports a restricted set of CDP domains. Runtime, Page, Network, DOM,
+Input and Emulation are available; ServiceWorker and BackgroundService are not.
+Their default setup attempts therefore appear in `target.setup_errors`; disable
+those setup flags if desired. Chrome restrictions, policies and debugger detach
+events remain visible. Opening DevTools on an attached tab can detach this debugger.
+Firefox/Camoufox support remains planned.
+
+Browser-level `waitForDebuggerOnStart: true` returns an explicit error in reverse
+mode: the extension cannot pause newly created root tabs before attachment.
+Keep its default false and create `about:blank`, finish setup, then navigate.
+Normal target-side `Target.setAutoAttach` is still native pass-through for children.
 
 ## Command-line arguments
 
@@ -871,6 +999,8 @@ dictionary containers have a null prototype.
 | `client.options` | Constructor browser defaults, excluding `base_path`. |
 | `client.custom_methods[name]` | Handler function. |
 | `client.browsers[name]` | Browser configuration fields plus live state. |
+| `client.reverse_sockets[name]` | Announced incoming native WebSocket, available even before the first call. |
+| `client.server` | Native Deno reverse `HttpServer`, or unset/null when not listening. |
 | `record.socket` | Current `jsrpc` connection once created. |
 | `record.proc` | Owned child process; absent for external attachment. |
 | `record.connecting` | In-progress connection promise, cleared after settlement. |
@@ -932,8 +1062,13 @@ subject to the debugging-port restrictions described above.
 Readiness timeout or launch failure rejects and attempts to
 terminate the spawned process.
 
-`jsrpc` takes a WebSocket URL and an options object whose recognized option is
+`jsrpc` takes a WebSocket URL or an accepted native WebSocket and an options
+object whose recognized option is
 `request_timeout_ms` (default `30000`). Wait for the socket to open before `req`.
+For an accepted socket, it returns that same WebSocket with RPC fields/methods;
+it remains a native WebSocket, but need not be an instance of the `jsrpc` subclass.
+The reverse server consumes the initial browser announcement before equipping
+the socket with RPC behavior. Empty-text heartbeats are ignored.
 The request is a raw envelope: `method`, optional `params`, and optional top-level
 `sessionId`. `req` assigns its own incrementing ID even if the input contains one.
 Its second argument overrides the timeout for that request. There are no browser
@@ -985,8 +1120,14 @@ into `npm/` alongside its manifest; no build script is needed.
 ```sh
 node --check cdp.js
 node --test tests/cdp.test.js
+deno test -A tests/reverse.test.js
 ```
 
 Integration tests launch local headless Chromium with disposable profiles under
 `build/tests/`. Set `CDP_BROWSER` if discovery does not match the machine. Direct
 library use needs no build or package installation; npm packaging is optional.
+The Deno test loads the real extension into two headless Chrome instances on one
+server port without remote-debugging arguments. It checks native/custom calls,
+Network events, bindings, child sessions, reconnect, detach/recreate and isolation.
+The extension sources live in the repository; the npm tarball remains limited to
+`package.json`, `cdp.js` and `README.md`.

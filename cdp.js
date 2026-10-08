@@ -45,15 +45,19 @@ export class util {
 
 export class jsrpc extends WebSocket {
   constructor(url, options = {}) {
-    super(url)
-    setMaxListeners(0, this)
-    this.id = 0
-    this.pending = {}
-    this.timeout_ms = options.request_timeout_ms ?? 30000
-    this.addEventListener('message', event => {
+    const socket = url instanceof WebSocket ? url : super(url)
+    setMaxListeners(0, socket)
+    socket.id = 0
+    socket.pending = {}
+    socket.timeout_ms = options.request_timeout_ms ?? 30000
+    socket.req = jsrpc.prototype.req
+    socket.notify = jsrpc.prototype.notify
+    socket.addEventListener('message', event => {
+      if (!event.data) return
       const message = JSON.parse(event.data)
-      util.emit(this, message.id === undefined ? 'notify' : 'rpc_' + message.id, message)
+      util.emit(socket, message.id === undefined ? 'notify' : 'rpc_' + message.id, message)
     })
+    return socket
   }
 
   async req(request, timeout_ms = this.timeout_ms) {
@@ -324,7 +328,38 @@ export class cdp extends EventTarget {
     this.base_path = path.resolve(base_path)
     this.options = options
     this.browsers = Object.create(null)
+    this.reverse_sockets = Object.create(null)
     this.custom_methods = { ...custom_methods }
+  }
+
+  listen_reverse({
+    hostname = '127.0.0.1',
+    port = 9223,
+  } = {}) {
+    if (!globalThis.Deno) throw new Error('The reverse WebSocket server requires Deno')
+    if (this.server) throw new Error('Reverse server is already listening')
+    return this.server = Deno.serve({
+      hostname,
+      port,
+    }, request => {
+      if (request.headers.get('upgrade') !== 'websocket' ||
+          !request.headers.get('origin')?.startsWith('chrome-extension://')) {
+        return new Response(null, { status: 403 })
+      }
+      const { socket, response } = Deno.upgradeWebSocket(request)
+      socket.addEventListener('message', event => {
+        const name = JSON.parse(event.data).browser
+        if (typeof name !== 'string' || !name || this.reverse_sockets[name]?.readyState < WebSocket.CLOSING) {
+          return socket.close(1008, 'Missing or already connected browser label')
+        }
+        this.reverse_sockets[name] = socket
+        socket.addEventListener('close', () => {
+          if (this.reverse_sockets[name] === socket) delete this.reverse_sockets[name]
+        })
+        util.emit(this, 'reverse_' + encodeURIComponent(name), socket)
+      }, { once: true })
+      return response
+    })
   }
 
   evaluate_xpath(params, fn, options) {
@@ -386,6 +421,12 @@ export class cdp extends EventTarget {
 
   async _connect(record) {
     let url = record.websocket_url
+    if (record.reverse) {
+      url = this.reverse_sockets[record.name]
+      if (url?.readyState !== WebSocket.OPEN) {
+        url = (await util.on_first(this, 'reverse_' + encodeURIComponent(record.name), record.connect_timeout_ms ?? 15000)).args[0].detail
+      }
+    }
     if (!url && (record.http_url || record.port)) {
       const discovery = new URL(record.http_url || 'http://' + (record.host || '127.0.0.1') + ':' + record.port)
       if (!discovery.pathname.endsWith('/json/version')) discovery.pathname = discovery.pathname.replace(/\/$/, '') + '/json/version'
@@ -426,7 +467,9 @@ export class cdp extends EventTarget {
         code: event.code,
       })
     })
-    await util.on_first(socket, 'open error close', record.connect_timeout_ms ?? 15000)
+    if (socket.readyState !== WebSocket.OPEN) {
+      await util.on_first(socket, 'open error close', record.connect_timeout_ms ?? 15000)
+    }
     await socket.req({
       method: 'Target.setAutoAttach',
       params: {
@@ -571,18 +614,25 @@ export class cdp extends EventTarget {
   }
 
   async close() {
-    await Promise.all(Object.values(this.browsers).map(async browser => {
-      try {
-        await browser.connecting
-        if (browser.proc && browser.socket?.readyState === WebSocket.OPEN) {
-          await browser.socket.req({ method: 'Browser.close' })
+    try {
+      await Promise.all(Object.values(this.browsers).map(async browser => {
+        try {
+          await browser.connecting
+          if (browser.proc && browser.socket?.readyState === WebSocket.OPEN) {
+            await browser.socket.req({ method: 'Browser.close' })
+          }
+        } finally {
+          browser.socket?.close()
+          browser.proc?.kill()
         }
-      } finally {
-        browser.socket?.close()
-        browser.proc?.kill()
-      }
-    }))
-    this.browsers = Object.create(null)
+      }))
+    } finally {
+      this.browsers = Object.create(null)
+      for (const socket of Object.values(this.reverse_sockets)) socket.close()
+      this.reverse_sockets = Object.create(null)
+      await this.server?.shutdown()
+      this.server = null
+    }
   }
 }
 

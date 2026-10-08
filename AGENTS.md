@@ -11,6 +11,9 @@ Apply the user's current instructions to the task at hand.
 | --- | --- |
 | `cdp.js` | Complete maintained implementation, an ES module importing only Node.js built-ins. |
 | `tests/cdp.test.js` | Node test-runner coverage with real headless Chromium. |
+| `tests/reverse.test.js` | Deno coverage with the real extension and two headless Chrome instances, without remote-debugging flags. |
+| `cdp_ext/` | Manifest V3 reverse transport: one Chrome worker and its configurable manifest. |
+| `examples/reverse.mjs` | Native Deno server example. |
 | `tests/chat-monitoring.md` | Manual application traffic inspection and tool-session extraction recipe. |
 | `npm/package.json` | Publication metadata and version; no root package manifest. |
 | `npm/PUBLISHING.md` | Initial npm login/publication and trusted publisher setup. |
@@ -27,6 +30,9 @@ Use Node.js 22.19+ and an installed Chromium-family browser. Direct library use
 needs no package install or compilation. There is no root package manifest or
 third-party runtime dependency; `npm/package.json` exists only for publication.
 Use `.mjs` for standalone examples and `CDP_BROWSER` to select a test executable.
+Reverse listening uses native Deno APIs, with no extra dependency. Node continues
+to support direct CDP. Download portable development runtimes into ignored `tools/`
+if needed; the extension itself is authoritative source under `cdp_ext/`.
 
 Keep the implementation in the root file. Generic examples in DEV_PREF mentioning
 another language or compiled-project layout are not instructions to migrate this
@@ -48,6 +54,25 @@ Do not move the CDP manager into `browser`. The browser helpers operate on
 options/files/processes, not CDP connections or target/session routing.
 `evaluate_xpath` belongs to `cdp` because it issues `Runtime.evaluate`; only the
 string rewrite belongs to `util`.
+
+`new jsrpc(socket)` decorates and returns an accepted native WebSocket, reusing
+the same request methods and event correlation. Do not duplicate this transport
+for reverse connections. Empty text is a heartbeat, not a JSON message.
+`cdp.listen_reverse` owns one native Deno server for all incoming extensions.
+The first JSON message announces `{ browser: name }`; do not assign separate
+ports or URL paths per browser. `reverse_sockets` is a public object keyed by that
+name. Reject duplicate live labels and keep old close events from deleting their
+replacement. Reverse browser records require `reverse: true`; they never launch
+processes or update profile files. Closing the manager also closes incoming
+sockets and the listener, preserving external browser processes and tabs.
+
+`cdp_ext` translates only the documented browser-level command subset through
+Chrome tabs/debugger APIs; session commands use native `chrome.debugger`.
+Root tab IDs, virtual root sessions and flattened native child sessions must stay
+distinct. The extension uses a first-message announcement, an awake retry timer,
+empty-text heartbeats and a Chrome alarm for offline worker wakeup. Browser-level
+pausing of new root tabs is unsupported and must fail explicitly. Never silently
+claim full browser CDP or Firefox compatibility.
 
 There is no Page abstraction. Browser and target records are plain data objects.
 Mappings are public objects, some with null prototypes. Custom handlers are
@@ -225,6 +250,7 @@ the task and preserve unrelated work. After a coherent implementation change:
 ```sh
 node --check cdp.js
 node --test tests/cdp.test.js
+deno test -A tests/reverse.test.js
 git diff --check
 ```
 

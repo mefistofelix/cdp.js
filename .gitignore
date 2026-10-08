@@ -3,6 +3,10 @@
 !/DEV_PREF.md
 !/AGENTS.md
 !/cdp.js
+!/cdp_ext/
+/cdp_ext/*
+!/cdp_ext/manifest.json
+!/cdp_ext/cdp_ext.js
 !/README.md
 !/TODO.md
 !/tests/

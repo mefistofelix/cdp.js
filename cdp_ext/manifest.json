@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "CDP reverse connection",
+  "version": "0.1.0",
+  "minimum_chrome_version": "125",
+  "permissions": [
+    "debugger",
+    "tabs",
+    "alarms"
+  ],
+  "background": {
+    "service_worker": "cdp_ext.js"
+  },
+  "cdp": {
+    "websocket_url": "ws://127.0.0.1:9223",
+    "browser": "main",
+    "reconnect_ms": 5000
+  }
+}
