@@ -201,13 +201,6 @@ export class browser {
 
   static async launch(options) {
     const args = browser.build_args(options)
-    const filename = path.join(args['user-data-dir'], args['profile-directory'] || 'Default', 'Preferences')
-    await browser.update_profile_preferences(filename, {
-      'translate.enabled': options.translations === true,
-      'signin.allowed': options.login === true,
-      'signin.allowed_on_next_startup': options.login === true,
-      ...options.preferences,
-    })
     const proc = child_process.spawn(options.executable_path || browser.find_executable_path(), [...util.args_to_strings(args), 'about:blank'], {
       windowsHide: options.windowsHide ?? (args.headless != null && args.headless !== false),
       stdio: ['ignore', 'ignore', 'pipe'],
@@ -362,6 +355,18 @@ export class cdp extends EventTarget {
     if (!url) {
       if (record.proc?.exitCode === null && record.proc.signalCode === null) url = record.socket.url
       else {
+        const args = browser.build_args(record)
+        if (args['user-data-dir'] && record.update_preferences !== false) {
+          await browser.update_profile_preferences(path.join(args['user-data-dir'], args['profile-directory'] || 'Default', 'Preferences'), {
+            'translate.enabled': record.translations === true,
+            'signin.allowed': record.login === true,
+            'signin.allowed_on_next_startup': record.login === true,
+            ...record.preferences,
+          })
+          if (Object.keys(record.local_state).length) {
+            await browser.update_profile_preferences(path.join(args['user-data-dir'], 'Local State'), record.local_state)
+          }
+        }
         const launched = await browser.launch(record)
         record.proc = launched.proc
         url = launched.url
@@ -477,6 +482,10 @@ export class cdp extends EventTarget {
       preferences: {
         ...this.options.preferences,
         ...spec.preferences,
+      },
+      local_state: {
+        ...this.options.local_state,
+        ...spec.local_state,
       },
       targets: Object.create(null),
     }

@@ -170,7 +170,8 @@ For a new browser record, configuration is assembled in this order:
 2. Constructor browser options.
 3. The `params.browser` configuration object.
 
-`args` and `preferences` are shallow-merged separately between steps 2 and 3.
+`args`, `preferences` and `local_state` are shallow-merged separately between
+steps 2 and 3.
 For duplicate keys, the per-browser value wins. Arrays replace previous arrays;
 they are not concatenated during this merge.
 
@@ -196,7 +197,7 @@ local configuration.
 | --- | --- | --- |
 | `base_path` | string, `'.cdp'` | Constructor-only profile root, resolved against the working directory. |
 | `name` | string, `'main'` when routing is omitted | Required in a browser configuration object; dictionary key and default profile directory label. |
-| `user_data_dir` | absolute path string, `<base_path>/<name>` | Chromium user-data directory containing profiles such as `Default`. The generated default is absolute; explicit overrides should be absolute too. |
+| `user_data_dir` | absolute path string or `null`, `<base_path>/<name>` | Chromium user-data directory containing profiles such as `Default`. Explicit paths should be absolute. `null` omits the switch and skips manager preference-file writes; Chromium selects its system directory. |
 | `executable_path` | string, automatic discovery | Executable to spawn; takes precedence over `CDP_BROWSER`. |
 | `headless` | boolean, `false` | When true, add `headless: 'new'` and default `window-size: '1440,900'`. |
 | `windowsHide` | boolean, effective headless mode | Hide the spawned process's console on Windows. Defaults to true when the final arguments include `--headless`, false otherwise; an explicit value wins. Does not hide the parent terminal. |
@@ -205,7 +206,9 @@ local configuration.
 | `translations` | boolean, `false` | Set translation preferences and, unless true, disable translation feature IDs. |
 | `login` | boolean, `false` | Set browser sign-in preferences and, unless true, disable sync and sign-in promotions. Does not prevent website login. |
 | `args` | object, `{}` | Raw CLI overrides applied after generated defaults; keys omit `--`. |
+| `update_preferences` | boolean, presence of an effective user-data directory | Manager-only switch for writing `Preferences` and `Local State` before launch. `false` skips both files. No files are written without a directory, including when explicitly true. |
 | `preferences` | object, `{}` | Dotted JSON preference overrides applied after generated preference defaults. |
+| `local_state` | object, `{}` | Dotted JSON overrides for `<user-data-dir>/Local State`, shared by profiles in that directory. No generated defaults. |
 | `connect_timeout_ms` | number, `15000` | Timeout for each discovery, launch-readiness or socket-opening wait; not one combined deadline. |
 | `request_timeout_ms` | number, `30000` | Default timeout for each protocol request on this browser's socket. |
 | `waitForDebuggerOnStart` | boolean, `false` | Ask Chromium to pause newly auto-attached targets. Applied to `Target.setAutoAttach` when connecting; not a CLI argument or target option. |
@@ -255,9 +258,9 @@ await client.call({
 })
 ```
 
-The existing browser must already expose CDP. Launch flags and profile
-preferences are not applied to it. `client.close()` disconnects its socket and
-leaves that browser running.
+The existing browser must already expose CDP. Launch flags, profile preferences
+and Local State overrides are not applied to it. `client.close()` disconnects its
+socket and leaves that browser running.
 
 `port: 9222` means **attach**. To **launch** on that port, use
 `args: { 'remote-debugging-port': 9222 }` without an attachment endpoint.
@@ -399,8 +402,9 @@ and `EnableTranslatePdf`. Unless `login` is true, it appends
 
 ## Profile preferences
 
-Local launch edits the profile's JSON `Preferences` file before spawning
-Chromium. The effective path is:
+The `cdp` manager edits the profile's JSON `Preferences` file before spawning
+Chromium when the effective `user-data-dir` argument specifies a directory and
+`update_preferences` is not false. The path is:
 
 ```text
 <args['user-data-dir']>/<args['profile-directory'] or Default>/Preferences
@@ -417,6 +421,10 @@ preference defaults are:
 
 `options.preferences` overwrites these defaults by key. Preferences and switches
 are separate layers; overriding one does not remove the other.
+`update_preferences: false` skips generated and raw preference writes, including
+`local_state`. It does not change generated CLI arguments. The default follows
+the effective directory, including raw overrides; the manager's generated named
+directory counts as a configured directory.
 
 ```js
 await client.call({
@@ -453,6 +461,49 @@ assigned at a key replaces that value; this is not a recursive merge of the
 supplied object. `null` is stored as JSON null. Malformed JSON, incompatible
 existing path values and filesystem errors propagate. It does not coordinate
 writes with a running browser, which may overwrite the file itself.
+
+### Local State and the remote-debugging checkbox
+
+Chrome stores settings shared by profiles in the same user-data directory in
+`<user-data-dir>/Local State`, outside `Default` or `Profile 1`. `local_state`
+instructs the `cdp` manager to update this file before launch using the same
+`browser.update_profile_preferences` helper and preservation rules.
+The effective raw `args['user-data-dir']` override
+selects its location; `profile-directory` does not affect it.
+
+For Chrome's `chrome://inspect/#remote-debugging` checkbox:
+
+```js
+const client = new cdp({
+  local_state: {
+    'devtools.remote_debugging.user-enabled': true,
+  },
+})
+```
+
+Set the key to `false` to disable it. The helper can also edit this file directly,
+before starting Chrome:
+
+```js
+await browser.update_profile_preferences('/absolute/user-data-dir/Local State', {
+  'devtools.remote_debugging.user-enabled': true,
+})
+```
+
+This is the user-enabled setting, distinct from the administrator policy
+`devtools.remote_debugging.allowed`. Chrome's native mode requires approval for
+incoming connections; setting the preference does not remove that prompt.
+The library's normal launch still uses `--remote-debugging-port`, which takes
+precedence over this mode. See the [Chromium implementation](https://github.com/chromium/chromium/blob/main/chrome/browser/devtools/remote_debugging_server.cc).
+
+`user_data_dir: null`, or a raw `args['user-data-dir']: null`/`false`, omits the
+directory switch. Direct `browser.launch` also omits it when no directory is
+provided. The manager skips both `preferences` and `local_state` writes in that
+case; it does not discover or edit the system directory. Chrome 136+ ignores
+the debugging-port switch for its system directory, so omitting the directory
+does not provide a working CDP connection through the normal launcher.
+Attach using an existing endpoint when using Chrome's native approval mode.
+See [Chrome's debugging-port restrictions](https://developer.chrome.com/blog/remote-debugging-port).
 
 ## Overlaps and override examples
 
@@ -800,11 +851,16 @@ try {
 }
 ```
 
-`browser.launch` requires a usable absolute directory through `user_data_dir` or
-`args['user-data-dir']`; this helper does not resolve that path for you. It writes
-preferences, starts the process, reads the
+`browser.launch` builds arguments, starts the process, reads the
 DevTools WebSocket URL from stderr and returns `{ proc, url }`. It does not open
-a CDP connection. Readiness timeout or launch failure rejects and attempts to
+a CDP connection or write preference files; `update_preferences`, `preferences`
+and `local_state` are manager options, ignored by this helper.
+To prepare files independently, call
+`browser.update_profile_preferences` explicitly before launch. The helper does
+not resolve `user_data_dir` or `args['user-data-dir']`; explicit paths should be
+absolute. Omitting the directory lets Chromium select its system directory,
+subject to the debugging-port restrictions described above.
+Readiness timeout or launch failure rejects and attempts to
 terminate the spawned process.
 
 `jsrpc` takes a WebSocket URL and an options object whose recognized option is

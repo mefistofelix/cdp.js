@@ -424,6 +424,60 @@ test('CLI options remain editable key/value objects until argv materialization',
   assert.ok(!argv.some(arg => arg.startsWith('--custom-switch')))
   assert.equal(argv.filter(arg => arg.startsWith('--window-size=')).length, 1)
   assert.ok(Object.keys(args).every(key => !key.startsWith('--')))
+  assert.ok(!util.args_to_strings(browser.build_args({ user_data_dir: null }))
+    .some(arg => arg.startsWith('--user-data-dir')))
+})
+
+test('manager without a user-data directory skips preference writes', async t => {
+  const client = await fixture(t, {
+    user_data_dir: null,
+    executable_path: path.join(build, 'missing-browser'),
+    preferences: {
+      'custom.value': true,
+    },
+    local_state: {
+      'devtools.remote_debugging.user-enabled': true,
+    },
+  })
+  await assert.rejects(call(client, 'Browser.getVersion', {}, null), /ENOENT/)
+})
+
+test('standalone launch and manager opt-out leave configured preferences unchanged', async t => {
+  for (const managed of [false, true]) {
+    const directory = await fs.mkdtemp(path.join(build, 'unchanged-'))
+    const filename = path.join(directory, 'Default', 'Preferences')
+    await browser.update_profile_preferences(filename, {
+      'custom.keep': 42,
+      'translate.enabled': true,
+    })
+    const state_filename = path.join(directory, 'Local State')
+    await browser.update_profile_preferences(state_filename, {
+      'custom.keep': 42,
+    })
+    const options = {
+      user_data_dir: directory,
+      headless: true,
+      update_preferences: false,
+      preferences: {
+        'custom.keep': false,
+      },
+      local_state: {
+        'custom.marker': true,
+      },
+    }
+    if (managed) {
+      const client = await fixture(t, options)
+      await call(client, 'Browser.getVersion', {}, null)
+    } else {
+      const launched = await browser.launch(options)
+      t.after(() => launched.proc.kill())
+    }
+    const prefs = JSON.parse(await fs.readFile(filename, 'utf8'))
+    assert.equal(prefs.custom.keep, 42)
+    assert.equal(prefs.translate.enabled, true)
+    const state = JSON.parse(await fs.readFile(state_filename, 'utf8'))
+    assert.deepEqual(state.custom, { keep: 42 })
+  }
 })
 
 test('generic preferences update nested keys, preserve siblings and accept overrides', async () => {
@@ -492,5 +546,54 @@ test('browser options reach actual Chrome arguments and translation/login prefer
       returnByValue: true,
     }, 'settings', browser.name)
     assert.deepEqual(result.result.value, [enabled, enabled])
+  }
+})
+
+test('Local State settings merge, preserve existing values and control the inspect checkbox', { timeout: 60000 }, async t => {
+  const client = await fixture(t, {
+    local_state: {
+      'devtools.remote_debugging.user-enabled': true,
+      'custom.from_defaults': 42,
+    },
+  })
+  for (const enabled of [false, true]) {
+    const directory = await fs.mkdtemp(path.join(build, 'local-state-'))
+    const filename = path.join(directory, 'Local State')
+    await browser.update_profile_preferences(filename, {
+      'custom.keep': 'existing',
+    })
+    const spec = {
+      name: enabled ? 'enabled' : 'disabled',
+      args: {
+        'user-data-dir': directory,
+        'profile-directory': 'Profile 1',
+      },
+      local_state: {
+        'devtools.remote_debugging.user-enabled': enabled,
+        'custom.from_browser': enabled,
+      },
+    }
+    await call(client, 'Page.navigate', { url: 'chrome://inspect/#remote-debugging' }, 'inspect', spec)
+    const result = await call(client, 'Runtime.evaluate', {
+      expression: `new Promise(resolve => {
+        const timer = setInterval(() => {
+          const checkbox = document.querySelector('#remote-debugging-enabled')
+          if (!checkbox || checkbox.disabled) return
+          clearInterval(timer)
+          resolve(checkbox.checked)
+        }, 20)
+      })`,
+      awaitPromise: true,
+      returnByValue: true,
+    }, 'inspect', spec.name)
+    assert.equal(result.result.value, enabled)
+    const state = JSON.parse(await fs.readFile(filename, 'utf8'))
+    assert.equal(state.devtools.remote_debugging['user-enabled'], enabled)
+    assert.deepEqual(state.custom, {
+      keep: 'existing',
+      from_defaults: 42,
+      from_browser: enabled,
+    })
+    await fs.access(path.join(directory, 'Profile 1', 'Preferences'))
   }
 })

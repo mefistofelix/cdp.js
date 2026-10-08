@@ -62,10 +62,11 @@ access model; do not add registration methods, trivial accessors or Maps.
 2. For native methods, remove `browser` and `target` from a copy of `params`.
    The input object must remain usable even when frozen.
 3. Create a browser record on first use. Merge constructor browser defaults and
-   the per-browser spec; `args` and `preferences` each get a separate shallow
-   merge. Reusing a label reuses its recorded configuration.
-4. `_connect` discovers an endpoint or launches a process, opens `jsrpc`, enables
-   flattened auto-attachment and target discovery. Concurrent calls share
+   the per-browser spec; `args`, `preferences` and `local_state` each get a
+   separate shallow merge. Reusing a label reuses its recorded configuration.
+4. `_connect` discovers an endpoint or prepares preference files and launches a
+   process, opens `jsrpc`, enables flattened auto-attachment and target discovery.
+   Concurrent calls share
    `record.connecting`.
 5. `_target` creates/reuses a physical target, attaches if needed, then runs setup.
    Calls share `entry.connecting`; the target's usable `sessionId` is assigned
@@ -115,7 +116,8 @@ respective generated values independently. There is no cross-layer conflict
 resolver. Do not add one implicitly or silently change defaults while refactoring.
 
 Constructor options supply browser defaults, not target defaults. Per-browser
-`args`/`preferences` use shallow key merges; arrays replace rather than concatenate.
+`args`/`preferences`/`local_state` use shallow key merges; arrays replace rather
+than concatenate.
 Configuration objects are applied on first use of a label, not on every call.
 Target configuration belongs to `params.target`.
 
@@ -154,9 +156,19 @@ on success, timeout and disconnect.
   `args['remote-debugging-port']` configures a new process.
 - Profile preferences use dotted keys and preserve unrelated JSON. Only a missing
   file becomes an empty object; parsing/other filesystem errors propagate.
-  Apply preferences before spawning.
+  The `cdp` manager applies preferences before spawning; `browser.launch` does
+  not write preference files. Keep `browser.update_profile_preferences` available
+  for explicit independent updates of either JSON file.
 - Locate `Preferences` using the effective `user-data-dir` and `profile-directory`
-  arguments, including raw overrides.
+  arguments, including raw overrides. Apply `local_state` to `Local State` at the
+  user-data root, shared by profiles in that directory. Chrome's inspect checkbox
+  uses `devtools.remote_debugging.user-enabled`, not the administrator policy key.
+  With no effective directory (`user_data_dir: null` or a null/false raw override),
+  omit the switch and skip manager file updates. Never infer the system directory
+  for writes. Chrome's default-directory debugging-port restrictions still apply.
+  `update_preferences: false` skips both files without changing CLI generation.
+  Its default follows the effective directory, including generated named profiles;
+  explicit true still cannot write files without a directory.
 - `browser.launch` returns `{ proc, url }` and opens no CDP socket. Track owned
   processes separately from attachments. Closing a manager preserves external
   browsers and profile directories. The browser option `windowsHide` defaults to
