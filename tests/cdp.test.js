@@ -442,6 +442,152 @@ test('manager without a user-data directory skips preference writes', async t =>
   await assert.rejects(call(client, 'Browser.getVersion', {}, null), /ENOENT/)
 })
 
+test('extension options cascade through raw arguments without mutating inputs', () => {
+  const feature = 'DisableDisableExtensionsExceptCommandLineSwitch'
+  const extensions = Object.freeze(['*', '/local/dev'])
+  const features = Object.freeze(['CustomFeature'])
+  const args = browser.build_args({
+    extensions,
+    args: {
+      'disable-features': features,
+    },
+  })
+  assert.deepEqual(args['disable-extensions-except'], extensions)
+  assert.deepEqual(args['disable-features'], ['CustomFeature', feature])
+  assert.equal(args['disable-extensions'], undefined)
+  assert.deepEqual(features, ['CustomFeature'])
+  const overridden = browser.build_args({
+    extensions,
+    args: {
+      'disable-extensions-except': false,
+    },
+  })
+  assert.equal(overridden['disable-extensions-except'], false)
+  assert.ok(!overridden['disable-features'].includes(feature))
+  const raw = browser.build_args({
+    extensions: false,
+    args: {
+      'disable-extensions-except': '*,/other/dev',
+      'disable-features': 'CustomFeature,' + feature,
+    },
+  })
+  assert.deepEqual(raw['disable-extensions-except'], ['*', '/other/dev'])
+  assert.deepEqual(raw['disable-features'], ['CustomFeature', feature])
+  assert.equal(raw['disable-extensions'], true)
+})
+
+test('profile extension discovery uses current records and preserves preference files', async () => {
+  const directory = await fs.mkdtemp(path.join(build, 'extension-paths-'))
+  const profile = path.join(directory, 'Profile 1')
+  const preferences = path.join(profile, 'Preferences')
+  const secure = path.join(profile, 'Secure Preferences')
+  await browser.update_profile_preferences(preferences, {
+    'extensions.settings.installed': {
+      location: 1,
+      path: 'installed/1.0_0',
+    },
+  })
+  await browser.update_profile_preferences(secure, {
+    'extensions.settings.installed': {
+      location: 1,
+      path: 'installed/2.0_0',
+    },
+    'extensions.settings.unpacked': {
+      location: 4,
+      path: directory,
+      disable_reasons: [],
+    },
+    'extensions.settings.disabled': {
+      location: 4,
+      path: '/disabled',
+      disable_reasons: [1],
+    },
+    'extensions.settings.legacy_disabled': {
+      location: 4,
+      path: '/legacy-disabled',
+      state: 0,
+    },
+    'extensions.settings.legacy_reasons': {
+      location: 4,
+      path: '/legacy-reasons',
+      disable_reasons: 1,
+    },
+    'extensions.settings.component': {
+      location: 5,
+      path: '/internal/component',
+    },
+  })
+  const before = await fs.readFile(secure, 'utf8')
+  const args = {
+    'user-data-dir': directory,
+    'profile-directory': 'Profile 1',
+  }
+  assert.deepEqual(await browser.profile_extension_paths(args), [
+    path.join(profile, 'Extensions', 'installed/2.0_0'),
+    directory,
+  ])
+  assert.equal(await fs.readFile(secure, 'utf8'), before)
+  assert.deepEqual(await browser.profile_extension_paths({ 'user-data-dir': directory }), [])
+  await assert.rejects(browser.profile_extension_paths({}), /requires user-data-dir/)
+  await fs.writeFile(secure, '{invalid')
+  await assert.rejects(browser.profile_extension_paths(args), SyntaxError)
+})
+
+test('local extensions and profile wildcard load during browser startup', { timeout: 60000 }, async t => {
+  const directory = await fs.mkdtemp(path.join(build, 'startup-extensions-'))
+  const profile = path.join(directory, 'Profile 1')
+  const installed = path.join(profile, 'Extensions', 'example', '2.0_0')
+  const old_version = path.join(profile, 'Extensions', 'example', '1.0_0')
+  const local = path.join(directory, 'local-dev')
+  const disabled = path.join(directory, 'disabled')
+  for (const [folder, name] of [[installed, 'Installed example'], [old_version, 'Old example'], [local, 'Local example'], [disabled, 'Disabled example']]) {
+    await fs.mkdir(folder, { recursive: true })
+    await fs.writeFile(path.join(folder, 'manifest.json'), JSON.stringify({
+      manifest_version: 3,
+      name,
+      version: '1.0',
+    }))
+  }
+  await browser.update_profile_preferences(path.join(profile, 'Preferences'), {
+    'extensions.settings.example': {
+      location: 1,
+      path: 'example/2.0_0',
+    },
+    'extensions.settings.disabled': {
+      location: 4,
+      path: disabled,
+      disable_reasons: [1],
+    },
+  })
+  const client = await fixture(t, {
+    extensions: Object.freeze(['*', local]),
+    args: {
+      'user-data-dir': directory,
+      'profile-directory': 'Profile 1',
+      'enable-unsafe-extension-debugging': true,
+      'disable-features': Object.freeze(['CustomFeature']),
+    },
+  })
+  const result = await call(client, 'Extensions.getExtensions', {}, null)
+  assert.deepEqual(result.extensions.map(extension => extension.name).sort(), ['Installed example', 'Local example'])
+  assert.ok(result.extensions.every(extension => extension.enabled))
+  const command = await call(client, 'Browser.getBrowserCommandLine', {}, null)
+  assert.ok(command.arguments.includes('--disable-extensions-except=' + [installed, local].join(',')))
+  assert.ok(command.arguments.includes('--disable-features=CustomFeature,DisableDisableExtensionsExceptCommandLineSwitch'))
+  assert.deepEqual(client.options.extensions, ['*', local])
+  for (const selector of [local, false]) {
+    const overridden = await fixture(t, {
+      extensions: ['*', installed],
+      args: {
+        'disable-extensions-except': selector,
+        'enable-unsafe-extension-debugging': true,
+      },
+    })
+    const loaded = await call(overridden, 'Extensions.getExtensions', {}, null)
+    assert.deepEqual(loaded.extensions.map(extension => extension.name), selector ? ['Local example'] : [])
+  }
+})
+
 test('standalone launch and manager opt-out leave configured preferences unchanged', async t => {
   for (const managed of [false, true]) {
     const directory = await fs.mkdtemp(path.join(build, 'unchanged-'))

@@ -152,6 +152,20 @@ on success, timeout and disconnect.
 - Keep per-browser headless, extensions, images, translations and login controls.
   Image-loading control is separate from image-processing support; browser sign-in
   control is separate from website authentication.
+  An `extensions` array generates `disable-extensions-except`; raw arguments then
+  override it. A final non-null/non-false selector appends
+  `DisableDisableExtensionsExceptCommandLineSwitch` once, including to a raw
+  feature list. Keep these as cascading argument conventions, without CDP install
+  commands or additional cross-layer reconciliation.
+  `browser.launch` expands exact `'*'` entries before spawn through
+  `browser.profile_extension_paths(args)`. Read current paths from `Preferences`
+  and `Secure Preferences`, with secure records taking precedence per ID. Include
+  only enabled records, including external unpacked directories; exclude disable
+  reasons, legacy disabled state and internal component locations. Do not scan
+  obsolete versions or change extension preference records. Use effective raw
+  directory arguments and require a directory for wildcard expansion; do not
+  infer the system profile. Preserve caller arrays, and propagate malformed JSON
+  and read errors other than missing files. Explicit paths remain selected.
 - `port`/`http_url`/`websocket_url` attach to an existing browser. Raw
   `args['remote-debugging-port']` configures a new process.
 - Profile preferences use dotted keys and preserve unrelated JSON. Only a missing

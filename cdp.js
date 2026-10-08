@@ -167,7 +167,8 @@ export class browser {
       args.headless = 'new'
       args['window-size'] = '1440,900'
     }
-    if (options.extensions !== true) {
+    if (Array.isArray(options.extensions)) args['disable-extensions-except'] = options.extensions
+    if (options.extensions !== true && !Array.isArray(options.extensions)) {
       args['disable-extensions'] = true
       args['disable-component-extensions-with-background-pages'] = true
     }
@@ -180,7 +181,35 @@ export class browser {
       args['disable-sync'] = true
       args['disable-features'].push('DiceWebSigninInterception', 'SigninPromoOnAvatarPill')
     }
-    return Object.assign(args, options.args)
+    Object.assign(args, options.args)
+    const extensions = args['disable-extensions-except']
+    if (extensions != null && extensions !== false) {
+      if (extensions === true) args['disable-extensions-except'] = []
+      else args['disable-extensions-except'] = Array.isArray(extensions) ? [...extensions] : String(extensions).split(',')
+      const features = args['disable-features']
+      args['disable-features'] = Array.isArray(features) ? [...features] : features ? String(features).split(',') : []
+      const feature = 'DisableDisableExtensionsExceptCommandLineSwitch'
+      if (!args['disable-features'].includes(feature)) args['disable-features'].push(feature)
+    }
+    return args
+  }
+
+  static async profile_extension_paths(args) {
+    if (!args['user-data-dir']) throw new Error('Expanding extension * requires user-data-dir')
+    const profile = path.join(args['user-data-dir'], args['profile-directory'] || 'Default')
+    const settings = {}
+    for (const filename of ['Preferences', 'Secure Preferences']) {
+      const content = await fs.readFile(path.join(profile, filename), 'utf8').catch(error => {
+        if (error.code !== 'ENOENT') throw error
+        return '{}'
+      })
+      Object.assign(settings, JSON.parse(content).extensions?.settings)
+    }
+    return Object.values(settings)
+      .filter(extension => extension.path && ![5, 10].includes(extension.location))
+      .filter(extension => extension.state !== 0 &&
+        !(Array.isArray(extension.disable_reasons) ? extension.disable_reasons.length : extension.disable_reasons))
+      .map(extension => path.isAbsolute(extension.path) ? extension.path : path.join(profile, 'Extensions', extension.path))
   }
 
   static async update_profile_preferences(filename, preferences) {
@@ -201,6 +230,13 @@ export class browser {
 
   static async launch(options) {
     const args = browser.build_args(options)
+    const extensions = args['disable-extensions-except']
+    if (extensions && extensions.includes('*')) {
+      const installed = await browser.profile_extension_paths(args)
+      args['disable-extensions-except'] = [...new Set(extensions.flatMap(directory =>
+        directory === '*' ? installed : directory,
+      ))]
+    }
     const proc = child_process.spawn(options.executable_path || browser.find_executable_path(), [...util.args_to_strings(args), 'about:blank'], {
       windowsHide: options.windowsHide ?? (args.headless != null && args.headless !== false),
       stdio: ['ignore', 'ignore', 'pipe'],

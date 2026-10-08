@@ -107,6 +107,7 @@ import api, { util, jsrpc, browser, cdp } from './cdp.js'
 | `socket.close()` | Native WebSocket close; does not terminate the browser. |
 | `browser.find_executable_path()` | Synchronously return an executable path from the environment or common locations. |
 | `browser.build_args(options = {})` | Return a fresh, editable object of launch switches. |
+| `browser.profile_extension_paths(args)` | Read the effective profile's extension records and return a promise for enabled extension directories. |
 | `browser.update_profile_preferences(filename, preferences)` | Update dotted keys in a JSON preferences file; return a promise. |
 | `browser.launch(options)` | Start a local browser and return a promise for `{ proc, url }`. The caller owns the process. |
 | `util.normalize_xpath(xpath)` | Return an XPath string with the supported rewrites. |
@@ -180,6 +181,10 @@ At local launch, another two independent merges happen:
 - Generated CLI defaults, adjusted by high-level browser options, then raw `args`.
 - Generated profile preference defaults, then raw `preferences`.
 
+After the CLI merge, a non-null/non-false `disable-extensions-except` adds
+`DisableDisableExtensionsExceptCommandLineSwitch` to the final `disable-features`
+list. This requested argument convention also applies to raw feature overrides.
+
 There is no conflict resolver across CLI flags and preferences. Each is passed
 to Chromium through its own mechanism. Raw settings can therefore contradict a
 high-level option; the library does not silently reconcile them.
@@ -201,7 +206,7 @@ local configuration.
 | `executable_path` | string, automatic discovery | Executable to spawn; takes precedence over `CDP_BROWSER`. |
 | `headless` | boolean, `false` | When true, add `headless: 'new'` and default `window-size: '1440,900'`. |
 | `windowsHide` | boolean, effective headless mode | Hide the spawned process's console on Windows. Defaults to true when the final arguments include `--headless`, false otherwise; an explicit value wins. Does not hide the parent terminal. |
-| `extensions` | boolean, `false` | When true, omit the two extension-disabling switches; does not install extensions. |
+| `extensions` | boolean or array of directory strings, `false` | True enables normal profile extensions. An array also generates `disable-extensions-except` to load the listed local directories at startup; include `'*'` to retain enabled profile extensions. False adds the two extension-disabling switches. |
 | `images` | boolean, `true` | When false, request `blink-settings: 'imagesEnabled=false'`; controls loading, not image processing. |
 | `translations` | boolean, `false` | Set translation preferences and, unless true, disable translation feature IDs. |
 | `login` | boolean, `false` | Set browser sign-in preferences and, unless true, disable sync and sign-in promotions. Does not prevent website login. |
@@ -354,8 +359,9 @@ and [content switches](https://raw.githubusercontent.com/chromium/chromium/main/
 | `disable-features` | array below | Disable named Chromium features. |
 | `headless` | `'new'` when `headless` is true | Run without a visible browser window. |
 | `window-size` | `'1440,900'` when headless | Set initial window dimensions. |
-| `disable-extensions` | `true` unless `extensions` is true | Disable browser extensions. |
+| `disable-extensions` | `true` unless `extensions` is true or an array | Disable browser extensions. |
 | `disable-component-extensions-with-background-pages` | same condition | Disable those component extensions. |
+| `disable-extensions-except` | the `extensions` array, otherwise unset | Load local directories and exclude other normal extensions. Raw overrides win. |
 | `blink-settings` | `'imagesEnabled=false'` when `images` is false | Disable image loading through Blink settings. |
 | `disable-signin-promo-on-avatar-pill-for-testing` | `true` unless `login` is true | Suppress the avatar sign-in promotion. |
 | `disable-sync` | same condition | Disable browser sync. |
@@ -398,7 +404,56 @@ These are native Chromium feature identifiers, not additional library options.
 Unless `translations` is true, the library appends `Translate`, `TranslateToast`
 and `EnableTranslatePdf`. Unless `login` is true, it appends
 `DiceWebSigninInterception` and `SigninPromoOnAvatarPill`. A raw
-`args['disable-features']` replaces that entire generated array.
+`args['disable-features']` replaces that generated array; an active
+`disable-extensions-except` then appends its required feature ID as described below.
+
+## Local extensions at startup
+
+These conventions operate before Chromium starts, without CDP installation calls
+or manual extension registration in preference files:
+
+1. An `extensions` array generates `disable-extensions-except` and omits the two
+   normal extension-disabling defaults. `extensions: true` alone keeps normal
+   profile loading without generating an exception list.
+2. Raw `args` override generated switches. A final non-null/non-false
+   `disable-extensions-except` automatically appends
+   `DisableDisableExtensionsExceptCommandLineSwitch` to `disable-features`, once.
+   Raw feature arrays or comma-separated strings retain their entries.
+3. At launch, an exact `'*'` entry expands to enabled extension paths from the
+   effective profile; duplicate paths are removed. Explicit paths remain selected.
+
+```js
+const client = new cdp({
+  extensions: [
+    '*',
+    '/absolute/path/to/local-extension',
+  ],
+})
+```
+
+The equivalent raw selection is `args['disable-extensions-except']` containing
+that array or a comma-separated string. It works independently of `extensions`;
+other raw switches remain effective. A null/false selector suppresses the generated
+exception list and its automatic feature addition. An empty array selects no
+normal extensions. Arrays passed by the caller are not mutated.
+
+`browser.build_args` leaves `'*'` unexpanded. `browser.launch` reads
+`<user-data-dir>/<profile-directory or Default>/Preferences` and `Secure Preferences`
+before spawning, using the final raw directory arguments. Secure records take
+precedence for duplicate IDs. Discovery uses the recorded current path, including
+absolute unpacked paths; it does not scan obsolete versions or activate disabled
+extensions. Disable reasons and legacy disabled state exclude entries; internal
+component extensions are not added to the list. Missing files contribute no
+entries; malformed JSON and other read errors reject launch. `'*'` requires an
+explicit effective user-data directory; the system directory is not inferred.
+`update_preferences: false` does not disable this read-only expansion.
+
+Explicit directories must contain unpacked extensions with `manifest.json`.
+The native argument excludes other normal extensions, so include `'*'` when
+preserving enabled profile extensions. Chromium still decides whether an extension
+can load. The feature override was verified on Chrome 154; it depends on Chrome
+retaining that internal switch, rather than a stable extension-installation API.
+See [Chromium's startup loader](https://github.com/chromium/chromium/blob/main/chrome/browser/extensions/extension_service.cc).
 
 ## Profile preferences
 
@@ -515,10 +570,12 @@ See [Chrome's debugging-port restrictions](https://developer.chrome.com/blog/rem
 | Explicit `windowsHide: true` or `false` | Pass that value to Node's `spawn`, regardless of headless mode. |
 | `extensions: true` plus `args['disable-extensions']: true` | The raw extension-disabling switch still wins. |
 | `extensions: false` plus only `args['disable-extensions']: false` | Remove that flag, but retain `disable-component-extensions-with-background-pages`. Use `extensions: true` to omit both generated flags. |
+| `extensions: ['*', directory]` | Select enabled profile extensions plus the explicit local directory before startup. |
+| An `extensions` array plus a raw `disable-extensions-except` | The raw selection replaces the generated array; null/false suppresses that selection. |
 | `images: false` plus an overridden `blink-settings` | Replace the whole string; image disabling is not appended to the caller's value. |
 | `translations: false` plus `preferences['translate.enabled']: true` | Store true in the profile, while generated translation-disabling feature IDs remain on the CLI. |
 | `login: true` plus `args['disable-sync']: true` | Allow profile sign-in through generated preferences while still requesting sync to be disabled. |
-| Any high-level settings plus a raw `disable-features` array | Replace the whole generated list, including translation/sign-in additions. |
+| Any high-level settings plus a raw `disable-features` array | Replace the generated list, including translation/sign-in additions; an active `disable-extensions-except` still appends its required feature ID. |
 | `user_data_dir` plus `args['user-data-dir']` | The raw argument determines both the profile write location and the launched browser directory. |
 | `port` plus `args['remote-debugging-port']` | Attach using `port`; no launch occurs, so the raw launch argument is unused. |
 | Constructor options plus an existing browser label | Reuse the stored record; configuration is not merged again on every call. |
