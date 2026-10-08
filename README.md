@@ -369,6 +369,13 @@ messages use existing CDP envelopes:
 - Notification: `{ method, params, sessionId? }`.
 - Empty text: heartbeat, ignored by `jsrpc`.
 
+`jsrpc` assigns increasing request IDs per socket, shared by all its targets and
+sessions. The extension echoes each request's ID in its response; IDs internal
+to `chrome.debugger` are not exposed. Replies can arrive out of order. A timed-out
+request's late reply cannot resolve a newer request. A new socket starts a new
+ID sequence; the extension sends replies only on the connection that received
+the request, so old completions cannot enter the replacement connection.
+
 Top-level target IDs are stringified Chrome tab IDs, stable while a tab survives.
 For root commands, the envelope's `sessionId` is that tab ID: the extension sends
 to its registered `{ tabId }` debuggee without a generated UUID.

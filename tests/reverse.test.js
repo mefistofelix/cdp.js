@@ -66,6 +66,38 @@ Deno.test('reverse extension controls real Chrome without remote-debugging argum
     const targetId = record.targets.page.targetId
     const oldSession = record.targets.page.sessionId
     assert.equal(oldSession, targetId, 'root routing uses the stable tab ID directly')
+    const completed = []
+    const [slow, fast] = await Promise.all([
+      call('Runtime.evaluate', {
+        expression: 'new Promise(resolve => setTimeout(() => resolve("slow"), 200))',
+        awaitPromise: true,
+      }).then(result => {
+        completed.push(result.result.value)
+        return result
+      }),
+      call('Runtime.evaluate', { expression: '"fast"' }).then(result => {
+        completed.push(result.result.value)
+        return result
+      }),
+    ])
+    assert.deepEqual(completed, ['fast', 'slow'], 'responses can arrive out of request order')
+    assert.deepEqual([slow.result.value, fast.result.value], ['slow', 'fast'])
+    const late = util.on_first(record.socket, 'rpc_' + (record.socket.id + 1))
+    await assert.rejects(record.socket.req({
+      method: 'Runtime.evaluate',
+      params: {
+        expression: 'new Promise(resolve => setTimeout(() => resolve("expired"), 150))',
+        awaitPromise: true,
+      },
+      sessionId: oldSession,
+    }, 30), /abort/i)
+    const fresh = call('Runtime.evaluate', {
+      expression: 'new Promise(resolve => setTimeout(() => resolve("fresh"), 300))',
+      awaitPromise: true,
+    })
+    assert.equal((await late).args[0].detail.result.result.value, 'expired')
+    assert.equal((await fresh).result.value, 'fresh', 'a late reply cannot complete a newer request')
+    assert.deepEqual(Object.keys(record.socket.pending), [])
     const targets = await call('Target.getTargets', {}, null)
     assert.equal(targets.targetInfos.some(info => info.targetId === targetId), true)
     assert.equal(targets.targetInfos.filter(info => info.type === 'page').length, 2, 'initial blank tab survives')
