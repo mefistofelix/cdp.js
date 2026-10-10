@@ -562,6 +562,11 @@ exposed `chrome.userScripts` API supports native source-code arguments, but Chro
 requires its user toggle: Developer mode before Chrome 138, or Allow User Scripts
 on the extension's details page from Chrome 138 onward.
 
+Overriding a function's `toString`, `Symbol.toPrimitive` or even
+`Function.prototype.toString` does not replace its injected source. Tested in the
+extension worker on Chrome 154: all three overrides were ignored and never called;
+the original function body executed in the page.
+
 The manifest grants `<all_urls>` host access and broad desktop extension API
 permissions for scripting/debugging, tabs/groups/sessions, bookmarks/history/reading
 list/search, cookies/content settings, storage, downloads, management, privacy/proxy,
@@ -1322,6 +1327,8 @@ Extension API coverage checks granted permissions, positional arguments, nested
 API receivers, synchronous/Promise/callback results, CSS/script injection, storage,
 native errors (including rejection of string-valued `func`) and
 false/null/undefined results.
+Function-injection checks also verify that custom string conversions cannot replace
+the injected function's source.
 Managed-launch coverage checks concurrent first use, profile-specific identity,
 connection timeout without process replacement, lazy listener startup/shutdown
 independent of direct browsers, and relaunch after confirmed exit. External reverse

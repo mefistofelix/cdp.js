@@ -22,6 +22,34 @@ Deno.test('reverse extension controls real Chrome without remote-debugging argum
   manifest.cdp.reconnect_ms = 200
   await fs.writeFile(path.join(extension, 'manifest.json'), JSON.stringify(manifest))
   await fs.copyFile('cdp_ext/cdp_ext.js', path.join(extension, 'cdp_ext.js'))
+  await fs.appendFile(path.join(extension, 'cdp_ext.js'), `
+chrome.cdp_probe = {
+  async function_source(target, source, mode) {
+    let conversions = 0
+    const replacement = () => {
+      conversions++
+      return source
+    }
+    const func = function () { return 'original' }
+    const original_toString = Function.prototype.toString
+    if (mode === 'own') func.toString = replacement
+    if (mode === 'primitive') func[Symbol.toPrimitive] = replacement
+    if (mode === 'prototype') Function.prototype.toString = replacement
+    try {
+      const results = await chrome.scripting.executeScript({
+        target,
+        func,
+      })
+      return {
+        results,
+        conversions,
+      }
+    } finally {
+      Function.prototype.toString = original_toString
+    }
+  },
+}
+`)
   await fs.writeFile(path.join(extension, 'probe.js'), 'document.querySelector("h1").dataset.injected = "yes"; 42')
   const args = util.args_to_strings(browser.build_args({
     headless: true,
@@ -156,6 +184,13 @@ Deno.test('reverse extension controls real Chrome without remote-debugging argum
     })
     assert.equal(injected[0].frameId, 0)
     assert.equal(injected[0].result, 42)
+    for (const mode of ['own', 'primitive', 'prototype']) {
+      const result = await call('chrome.cdp_probe.function_source', {
+        args: [{ tabId }, 'function () { return "replacement" }', mode],
+      }, null)
+      assert.equal(result.results[0].result, 'original', mode + ' cannot replace injected source')
+      assert.equal(result.conversions, 0, mode + ' conversion is never called')
+    }
     for (const func of ['() => 42', 'function () { return 42 }', 'return 42']) {
       await assert.rejects(call('chrome.scripting.executeScript', {
         args: [{
