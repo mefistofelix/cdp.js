@@ -178,6 +178,11 @@ function connect() {
         const name = names.pop()
         const object = names.reduce((object, name) => object[name], chrome)
         const args = params.args ?? []
+        if (method === 'chrome.scripting.executeScript' && typeof args[0]?.func === 'string') {
+          const injection = args[0]
+          injection.args = [injection.func, ...(injection.args ?? [])]
+          injection.func = (source, ...args) => (0, eval)('(' + source + ')')(...args)
+        }
         result = params.callback
           ? await new Promise((resolve, reject) => object[name](...args, value => {
             const error = chrome.runtime.lastError

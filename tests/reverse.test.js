@@ -24,6 +24,25 @@ Deno.test('reverse extension controls real Chrome without remote-debugging argum
   await fs.copyFile('cdp_ext/cdp_ext.js', path.join(extension, 'cdp_ext.js'))
   await fs.appendFile(path.join(extension, 'cdp_ext.js'), `
 chrome.cdp_probe = {
+  execute_native(injection) {
+    return chrome.scripting.executeScript(injection)
+  },
+  evaluate_source(target, source, world, kind) {
+    return chrome.scripting.executeScript({
+      target,
+      world,
+      args: [source, kind],
+      func: (source, kind) => {
+        try {
+          return {
+            value: kind === 'eval' ? eval(source) : new Function('return (' + source + ')')(),
+          }
+        } catch (error) {
+          return { error: error.message }
+        }
+      },
+    })
+  },
   async function_source(target, source, mode) {
     let conversions = 0
     const replacement = () => {
@@ -70,9 +89,11 @@ chrome.cdp_probe = {
   const page_server = Deno.serve({
     hostname: '127.0.0.1',
     port: 0,
-  }, () => new Response('<h1>Reverse test</h1><button onclick="this.textContent=\'clicked\'">Click</button>', {
-    headers: { 'content-type': 'text/html' },
-  }))
+  }, request => {
+    const headers = { 'content-type': 'text/html' }
+    if (new URL(request.url).pathname === '/csp') headers['content-security-policy'] = "script-src 'none'"
+    return new Response('<h1>Reverse test</h1><button onclick="this.textContent=\'clicked\'">Click</button>', { headers })
+  })
   const call = (method, params = {}, target = 'page') => client.call({
     method,
     params: {
@@ -184,6 +205,108 @@ chrome.cdp_probe = {
     })
     assert.equal(injected[0].frameId, 0)
     assert.equal(injected[0].result, 42)
+    for (const world of ['ISOLATED', 'MAIN']) {
+      for (const kind of ['eval', 'function']) {
+        const result = await call('chrome.cdp_probe.evaluate_source', {
+          args: [{ tabId }, '21 * 2', world, kind],
+        }, null)
+        if (world === 'MAIN') assert.equal(result[0].result.value, 42)
+        else assert.match(result[0].result.error, /unsafe-eval/)
+      }
+    }
+    assert.equal((await call('chrome.scripting.executeScript', {
+      args: [{
+        target: { tabId },
+        world: 'MAIN',
+        func: '(first, second) => first + second',
+        args: [19, 23],
+      }],
+    }, null))[0].result, 42)
+    assert.equal((await call('chrome.scripting.executeScript', {
+      args: [{
+        target: { tabId },
+        world: 'MAIN',
+        func: 'async value => Promise.resolve(value * 2)',
+        args: [21],
+      }],
+    }, null))[0].result, 42)
+    const cspId = (await call('Target.createTarget', {
+      url: 'http://127.0.0.1:' + page_server.addr.port + '/csp',
+    }, null)).targetId
+    for (const world of ['ISOLATED', 'MAIN']) {
+      const result = await call('chrome.cdp_probe.evaluate_source', {
+        args: [{ tabId: Number(cspId) }, '21 * 2', world, 'eval'],
+      }, null)
+      assert.match(result[0].result.error, /unsafe-eval/)
+    }
+    const cspSession = (await call('Target.attachToTarget', { targetId: cspId }, null)).sessionId
+    await record.socket.req({
+      method: 'Page.setBypassCSP',
+      params: { enabled: true },
+      sessionId: cspSession,
+    })
+    await record.socket.req({
+      method: 'Page.enable',
+      sessionId: cspSession,
+    })
+    const cspReloaded = util.on_first(client, 'Page.loadEventFired')
+    await record.socket.req({
+      method: 'Page.reload',
+      sessionId: cspSession,
+    })
+    await cspReloaded
+    for (const kind of ['eval', 'function']) {
+      const result = await call('chrome.cdp_probe.evaluate_source', {
+        args: [{ tabId: Number(cspId) }, 'document.querySelector("h1").textContent', 'MAIN', kind],
+      }, null)
+      assert.equal(result[0].result.value, 'Reverse test')
+    }
+    assert.equal((await call('chrome.scripting.executeScript', {
+      args: [{
+        target: { tabId: Number(cspId) },
+        world: 'MAIN',
+        func: 'source => (0, eval)(source)',
+        args: ['document.querySelector("h1").dataset.executed = "yes"; Promise.resolve(42)'],
+      }],
+    }, null))[0].result, 42)
+    await record.socket.req({
+      method: 'Page.setBypassCSP',
+      params: { enabled: false },
+      sessionId: cspSession,
+    })
+    await call('chrome.declarativeNetRequest.updateSessionRules', {
+      args: [{
+        addRules: [{
+          id: 1,
+          priority: 1,
+          action: {
+            type: 'modifyHeaders',
+            responseHeaders: [{
+              header: 'content-security-policy',
+              operation: 'remove',
+            }],
+          },
+          condition: {
+            tabIds: [Number(cspId)],
+            resourceTypes: ['main_frame'],
+          },
+        }],
+      }],
+    }, null)
+    const cspRemoved = util.on_first(client, 'Page.loadEventFired')
+    await call('chrome.tabs.reload', { args: [Number(cspId)] }, null)
+    await cspRemoved
+    await call('Target.detachFromTarget', { sessionId: cspSession }, null)
+    for (const kind of ['eval', 'function']) {
+      const result = await call('chrome.cdp_probe.evaluate_source', {
+        args: [{ tabId: Number(cspId) }, 'document.querySelector("h1").textContent', 'MAIN', kind],
+      }, null)
+      assert.equal(result[0].result.value, 'Reverse test')
+    }
+    await call('chrome.declarativeNetRequest.updateSessionRules', {
+      args: [{ removeRuleIds: [1] }],
+    }, null)
+    await call('Target.closeTarget', { targetId: cspId }, null)
     for (const mode of ['own', 'primitive', 'prototype']) {
       const result = await call('chrome.cdp_probe.function_source', {
         args: [{ tabId }, 'function () { return "replacement" }', mode],
@@ -192,7 +315,7 @@ chrome.cdp_probe = {
       assert.equal(result.conversions, 0, mode + ' conversion is never called')
     }
     for (const func of ['() => 42', 'function () { return 42 }', 'return 42']) {
-      await assert.rejects(call('chrome.scripting.executeScript', {
+      await assert.rejects(call('chrome.cdp_probe.execute_native', {
         args: [{
           target: { tabId },
           func,
@@ -203,6 +326,12 @@ chrome.cdp_probe = {
         return true
       })
     }
+    await assert.rejects(call('chrome.userScripts.execute', {
+      args: [{
+        target: { tabId },
+        js: [{ code: '42' }],
+      }],
+    }, null), error => !!error.cdp)
     assert.equal((await call('Runtime.evaluate', {
       expression: 'document.querySelector("h1").dataset.injected',
     })).result.value, 'yes')
@@ -356,6 +485,15 @@ chrome.cdp_probe = {
 
 Deno.test('managed reverse launch uses extension identity and keeps a live process through disconnects', async () => {
   const directory = await fs.mkdtemp(path.resolve('build/tests/managed-reverse-'))
+  const page_server = Deno.serve({
+    hostname: '127.0.0.1',
+    port: 0,
+  }, () => new Response('<h1>User script test</h1>', {
+    headers: {
+      'content-type': 'text/html',
+      'content-security-policy': "script-src 'none'",
+    },
+  }))
   const client = new cdp({
     base_path: directory,
     headless: true,
@@ -388,6 +526,39 @@ Deno.test('managed reverse launch uses extension identity and keeps a live proce
         expression: '42',
       },
     })
+    const extension = path.join(spec.args['user-data-dir'], spec.args['profile-directory'], 'cdp_ext')
+    await fs.mkdir(extension, { recursive: true })
+    const manifest = JSON.parse(await fs.readFile('cdp_ext/manifest.json', 'utf8'))
+    manifest.cdp.websocket_url = 'ws://127.0.0.1:0'
+    await fs.writeFile(path.join(extension, 'manifest.json'), JSON.stringify(manifest))
+    await fs.copyFile('cdp_ext/cdp_ext.js', path.join(extension, 'cdp_ext.js'))
+    const preparation = new cdp({
+      headless: true,
+      extensions: [extension],
+      args: spec.args,
+    })
+    try {
+      const enabled = await preparation.call({
+        method: 'Runtime.evaluate',
+        params: {
+          target: {
+            name: 'extensions',
+            create_params: { url: 'chrome://extensions/' },
+          },
+          expression: 'chrome.developerPrivate.updateExtensionConfiguration(' + JSON.stringify({
+            extensionId: browser.extension_id(extension),
+            userScriptsAccess: true,
+          }) + ').then(() => true)',
+          awaitPromise: true,
+        },
+      })
+      assert.equal(enabled.result.value, true)
+      const stopped = once(preparation.browsers.main.proc, 'exit')
+      await preparation.call({ method: 'Browser.close' })
+      await stopped
+    } finally {
+      await preparation.close()
+    }
     const results = await Promise.all([call(), call()])
     assert.deepEqual(results.map(result => result.result.value), [42, 42])
     const record = client.browsers.work
@@ -401,6 +572,45 @@ Deno.test('managed reverse launch uses extension identity and keeps a live proce
     assert.equal(original.spawnargs.some(arg => arg.startsWith('--remote-debugging')), false)
     assert.equal((await fs.readFile(path.join(record.extension_path, 'manifest.json'), 'utf8')).includes('"browser"'), false)
     assert.equal(Object.keys(record.targets).length, 1)
+    assert.deepEqual(await client.call({
+      method: 'chrome.userScripts.getScripts',
+      params: { browser: 'work' },
+    }), [])
+    const loaded = util.on_first(client, 'Page.loadEventFired')
+    await client.call({
+      method: 'Page.navigate',
+      params: {
+        browser: 'work',
+        target: 'page',
+        url: 'http://127.0.0.1:' + page_server.addr.port,
+      },
+    })
+    await loaded
+    const execute = code => client.call({
+      method: 'chrome.userScripts.execute',
+      params: {
+        browser: 'work',
+        args: [{
+          target: { tabId: Number(record.targets.page.targetId) },
+          js: [{ code }],
+        }],
+      },
+    })
+    const executed = await execute('document.querySelector("h1").dataset.injected = "yes"; 21 * 2')
+    assert.equal(executed[0].frameId, 0)
+    assert.equal(executed[0].result, 42)
+    assert.equal((await execute('document.querySelector("h1").dataset.injected'))[0].result, 'yes')
+    assert.equal((await execute('Promise.resolve(43)'))[0].result, 43)
+    await assert.rejects(client.call({
+      method: 'chrome.userScripts.execute',
+      params: {
+        browser: 'work',
+        args: [{
+          target: { tabId: -1 },
+          js: [{ code: '42' }],
+        }],
+      },
+    }), error => !!error.cdp)
     const closed = util.on_first(client, 'close')
     record.socket.close()
     await closed
@@ -433,6 +643,7 @@ Deno.test('managed reverse launch uses extension identity and keeps a live proce
     await client.close()
     await exited
     await direct_exited
+    await page_server.shutdown()
   }
 })
 

@@ -11,7 +11,7 @@ Apply the user's current instructions to the task at hand.
 | --- | --- |
 | `cdp.js` | Complete maintained implementation, an ES module importing only Node.js built-ins. |
 | `tests/cdp.test.js` | Node test-runner coverage with real headless Chromium. |
-| `tests/reverse.test.js` | Deno coverage with the real extension and two headless Chrome instances, without remote-debugging flags. |
+| `tests/reverse.test.js` | Deno coverage with the real extension and headless Chrome; reverse execution uses no remote-debugging flags. Direct CDP prepares the disposable user-script toggle fixture. |
 | `cdp_ext/` | Manifest V3 reverse transport: one Chrome worker and its configurable manifest. |
 | `examples/reverse.mjs` | Native Deno server example. |
 | `tests/chat-monitoring.md` | Manual application traffic inspection and tool-session extraction recipe. |
@@ -96,9 +96,17 @@ before CDP session dispatch. Resolve nested owners generically and preserve the
 receiver; `params.args` holds native positional arguments, including native target
 objects. Optional `params.callback` appends a callback and propagates
 `chrome.runtime.lastError`. Preserve native JSON results; normalize only undefined
-to `{}`. Do not add wrappers per API, source-string eval, automatic tab-ID injection
-or remote event subscriptions. The manifest declares broad desktop API permissions
-and host access; native Chrome availability, user gestures and resource requirements
+to `{}`. The requested `chrome.scripting.executeScript` exception converts a string
+`func` into a fixed native function that evaluates the function expression in the
+destination world and calls it with the original injection arguments. Preserve the
+native world default and Promise/results behavior. Never evaluate source in the
+worker. Do not add other per-API wrappers, automatic tab-ID injection or remote
+event subscriptions. CSP changes require explicit native API calls; do not bypass
+or remove CSP automatically. `chrome.userScripts` remains generic pass-through:
+its permission does not enable Chrome's user toggle. Neither extension launch nor
+profile defaults may silently enable Allow User Scripts. The manifest declares
+broad desktop API permissions and host access; native Chrome availability, user
+gestures and resource requirements
 still apply. Generic extension calls must not change direct CDP dispatch.
 Root tab IDs and flattened native child sessions must stay distinct. The shared
 reverse envelope keeps `sessionId`: for roots it contains the stable stringified

@@ -551,21 +551,113 @@ Ports, Blobs and other live/non-JSON objects have no remote representation.
 The bridge adds no extension event subscriptions.
 
 `chrome.scripting.executeScript` supports `files` relative to the loaded extension
-directory and returns the native array of frame results. JSON serialization drops
-JavaScript functions; strings are not converted into functions and the worker does not use
-`eval`. Tested on Chrome 154: arrow-function source, function-expression source and
-a function body sent as `func` strings all fail native validation with
-`Invalid type: expected function, found string.` Chrome serializes an actual
-function only after accepting the extension API call. Continue using CDP
-`Runtime.evaluate` for source expressions. The separately
-exposed `chrome.userScripts` API supports native source-code arguments, but Chrome
-requires its user toggle: Developer mode before Chrome 138, or Allow User Scripts
-on the extension's details page from Chrome 138 onward.
+directory and returns the native array of frame results. The bridge also accepts
+`func` as a function-expression string, including arrow and async functions:
 
-Overriding a function's `toString`, `Symbol.toPrimitive` or even
-`Function.prototype.toString` does not replace its injected source. Tested in the
-extension worker on Chrome 154: all three overrides were ignored and never called;
-the original function body executed in the page.
+```js
+const frames = await client.call({
+  method: 'chrome.scripting.executeScript',
+  params: {
+    browser: 'work',
+    args: [{
+      target: {
+        tabId,
+      },
+      world: 'MAIN',
+      func: '(first, second) => first + second',
+      args: [19, 23],
+    }],
+  },
+})
+console.log(frames[0].result) // 42
+```
+
+Only string-valued `func` is adapted: a fixed native function evaluates that source
+inside the destination world, then calls it with the supplied injection `args`.
+The worker does not evaluate incoming source. Other injection fields remain native;
+Chrome awaits returned Promises and returns its frame-result array. A bare body
+such as `return 42` is not a function expression. To execute arbitrary script text,
+use `func: 'code => (0, eval)(code)'` and `args: [code]`; the last expression or
+resolved Promise supplies the result. Both paths have access to the destination DOM.
+
+The native world default remains `ISOLATED`, whose content-script CSP blocks `eval`
+and `new Function`. Select `MAIN` explicitly for string functions; the page's CSP
+must allow string evaluation there. Both evaluators require the same `unsafe-eval`
+permission, so switching between them does not bypass CSP. Native execution errors
+may leave a frame result without `result`; consult the tab console as well. See
+[content-script CSP](https://developer.chrome.com/docs/extensions/develop/concepts/content-scripts#content_security_policy).
+
+CSP changes are explicit calls, never automatic. Two existing API paths are:
+
+- With a debugger attachment, call `Page.setBypassCSP` with `enabled: true` on the
+  selected target **before navigation or reload**, then inject into `MAIN`.
+  Set `enabled: false` and reload to restore normal enforcement. This native CDP
+  method works through the reverse extension too; `Runtime.evaluate` already
+  accepts script text through the same debugger connection.
+- Without a debugger, call `chrome.declarativeNetRequest.updateSessionRules` with a
+  `modifyHeaders` rule removing the `content-security-policy` response header.
+  Scope its `condition.tabIds` to the intended tab and its `resourceTypes` to
+  `main_frame` (include `sub_frame` for iframe navigations), then reload the tab.
+  Remove the rule through `removeRuleIds` when finished and reload again. Session
+  rules expire on browser shutdown. Header removal does not remove a CSP supplied
+  by HTML `<meta>`; the policy already applied to a loaded document also remains
+  until navigation. CSP affects the page's scripts as well as the injection.
+
+See [Page.setBypassCSP](https://chromedevtools.github.io/devtools-protocol/tot/Page/#method-setBypassCSP)
+and [declarative request rules](https://developer.chrome.com/docs/extensions/reference/api/declarativeNetRequest).
+Tested on Chrome 154: both explicit paths allow `MAIN` string evaluation and DOM
+access on a page served with `script-src 'none'`.
+
+These operations are observable. Page JavaScript can probe `eval` or `new Function`
+and compare the outcome with its intended CSP. Code in `MAIN` shares the page's
+globals, including any replacements of those functions. There is no standard page
+API reporting which extension attached a debugger, but inspector operations can
+have observable effects; attachment is not guaranteed to be invisible. V8 explicitly
+treats prevention of [inspector detection](https://chromium.googlesource.com/v8/v8/+/c195efb1d03b5171c376a02bca885c68792ae0f7/src/inspector/SECURITY.md)
+as a non-goal. A current behavioral probe does not provide a reliable history of
+every past attachment or identify the caller by itself.
+
+For native script-text injection without changing the page's CSP,
+`chrome.userScripts.execute` (Chrome 135+) accepts `js[].code`. Its default
+`USER_SCRIPT` world shares the DOM but has separate JavaScript globals and is exempt
+from the page's CSP. `MAIN` instead shares the page's globals and CSP.
+
+```js
+const frames = await client.call({
+  method: 'chrome.userScripts.execute',
+  params: {
+    browser: 'work',
+    args: [{
+      target: {
+        tabId,
+      },
+      js: [{
+        code: 'document.querySelector("h1").dataset.injected = "yes"; Promise.resolve(42)',
+      }],
+    }],
+  },
+})
+console.log(frames[0].result) // 42
+```
+
+The manifest includes the permission, but Chrome also requires explicit user
+activation: Developer mode before Chrome 138, or **Allow User Scripts** on the
+extension's details page from Chrome 138 onward. Open
+`chrome://extensions/?id=<extension_id>` using `client.browsers.work.extension_id`.
+If necessary, reload the extension after enabling the toggle. Neither `cdp_ext: true`
+nor `extensions` enables it or adds a default profile setting. A previously enabled
+profile retains its choice. Chrome stores the extension-specific
+`extensions.settings.<extension_id>.user_scripts_enabled` setting; on Windows it
+is in protected `Secure Preferences`, and simply writing the key into a fresh
+profile did not enable access in our test. Use Chrome's toggle rather than assuming
+a normal `preferences` entry can update protected extension settings.
+See the native [userScripts API and activation steps](https://developer.chrome.com/docs/extensions/reference/api/userScripts).
+
+Chrome's native `scripting.executeScript` still rejects strings supplied directly
+as `func`; the bridge's fixed function makes this adaptation possible. Overriding
+an actual function's `toString`, `Symbol.toPrimitive` or `Function.prototype.toString`
+does not replace the source Chrome serializes. Tests on Chrome 154 confirmed that
+these overrides were never called and the original function executed.
 
 The manifest grants `<all_urls>` host access and broad desktop extension API
 permissions for scripting/debugging, tabs/groups/sessions, bookmarks/history/reading
@@ -1325,10 +1417,15 @@ server port without remote-debugging arguments. It checks native/custom calls,
 Network events, bindings, child sessions, reconnect, detach/recreate and isolation.
 Extension API coverage checks granted permissions, positional arguments, nested
 API receivers, synchronous/Promise/callback results, CSS/script injection, storage,
-native errors (including rejection of string-valued `func`) and
-false/null/undefined results.
-Function-injection checks also verify that custom string conversions cannot replace
-the injected function's source.
+native validation errors and false/null/undefined results. Function-injection checks
+cover native string rejection, ignored custom string conversions, the bridge's
+string-function adapter and async arguments/results. Real page CSP checks cover
+both evaluators in both worlds, explicit debugger bypass after reload, and explicit
+header removal through session rules. User-script checks cover default denied
+access and explicit activation, DOM changes and Promise results under restrictive
+page CSP. Only the disposable profile's toggle preparation uses direct CDP to
+operate Chrome's extensions settings; the subsequent reverse execution uses no
+remote-debugging flags and does not automatically enable the toggle.
 Managed-launch coverage checks concurrent first use, profile-specific identity,
 connection timeout without process replacement, lazy listener startup/shutdown
 independent of direct browsers, and relaunch after confirmed exit. External reverse
