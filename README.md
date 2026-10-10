@@ -551,9 +551,13 @@ Ports, Blobs and other live/non-JSON objects have no remote representation.
 The bridge adds no extension event subscriptions.
 
 `chrome.scripting.executeScript` supports `files` relative to the loaded extension
-directory and returns the native array of frame results. A `func` cannot be sent
-over JSON; strings are not converted into functions and the worker does not use
-`eval`. Continue using CDP `Runtime.evaluate` for source expressions. The separately
+directory and returns the native array of frame results. JSON serialization drops
+JavaScript functions; strings are not converted into functions and the worker does not use
+`eval`. Tested on Chrome 154: arrow-function source, function-expression source and
+a function body sent as `func` strings all fail native validation with
+`Invalid type: expected function, found string.` Chrome serializes an actual
+function only after accepting the extension API call. Continue using CDP
+`Runtime.evaluate` for source expressions. The separately
 exposed `chrome.userScripts` API supports native source-code arguments, but Chrome
 requires its user toggle: Developer mode before Chrome 138, or Allow User Scripts
 on the extension's details page from Chrome 138 onward.
@@ -1316,7 +1320,8 @@ server port without remote-debugging arguments. It checks native/custom calls,
 Network events, bindings, child sessions, reconnect, detach/recreate and isolation.
 Extension API coverage checks granted permissions, positional arguments, nested
 API receivers, synchronous/Promise/callback results, CSS/script injection, storage,
-native errors and false/null/undefined results.
+native errors (including rejection of string-valued `func`) and
+false/null/undefined results.
 Managed-launch coverage checks concurrent first use, profile-specific identity,
 connection timeout without process replacement, lazy listener startup/shutdown
 independent of direct browsers, and relaunch after confirmed exit. External reverse

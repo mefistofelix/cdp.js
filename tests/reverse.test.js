@@ -156,6 +156,18 @@ Deno.test('reverse extension controls real Chrome without remote-debugging argum
     })
     assert.equal(injected[0].frameId, 0)
     assert.equal(injected[0].result, 42)
+    for (const func of ['() => 42', 'function () { return 42 }', 'return 42']) {
+      await assert.rejects(call('chrome.scripting.executeScript', {
+        args: [{
+          target: { tabId },
+          func,
+        }],
+      }), error => {
+        assert.match(error.cdp.error.message, /expected function, found string/)
+        assert.equal(error.cause.req.params.args[0].func, func)
+        return true
+      })
+    }
     assert.equal((await call('Runtime.evaluate', {
       expression: 'document.querySelector("h1").dataset.injected',
     })).result.value, 'yes')
