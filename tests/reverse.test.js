@@ -22,6 +22,7 @@ Deno.test('reverse extension controls real Chrome without remote-debugging argum
   manifest.cdp.reconnect_ms = 200
   await fs.writeFile(path.join(extension, 'manifest.json'), JSON.stringify(manifest))
   await fs.copyFile('cdp_ext/cdp_ext.js', path.join(extension, 'cdp_ext.js'))
+  await fs.writeFile(path.join(extension, 'probe.js'), 'document.querySelector("h1").dataset.injected = "yes"; 42')
   const args = util.args_to_strings(browser.build_args({
     headless: true,
     user_data_dir: path.join(directory, 'profile'),
@@ -122,6 +123,69 @@ Deno.test('reverse extension controls real Chrome without remote-debugging argum
     assert.equal((await call('Runtime.evaluate', {
       expression: 'document.querySelector("button").textContent',
     })).result.value, 'clicked')
+
+    const tabId = Number(targetId)
+    const granted = await call('chrome.permissions.getAll', {}, null)
+    assert.deepEqual(granted.permissions.toSorted(), manifest.permissions.toSorted())
+    assert.ok(granted.origins.includes('<all_urls>'))
+    assert.ok((await call('chrome.tabs.query', { args: [{}] }, null)).some(tab => tab.id === tabId))
+    assert.equal((await call('chrome.tabs.get', { args: [tabId] })).id, tabId)
+    assert.equal((await call('chrome.tabs.update', {
+      args: [tabId, { muted: true }],
+    })).mutedInfo.muted, true)
+    assert.equal(await call('chrome.runtime.getURL', { args: ['probe.js'] }, null),
+      'chrome-extension://' + record.extension_id + '/probe.js')
+    assert.deepEqual(await call('chrome.scripting.getRegisteredContentScripts', {}, null), [])
+    const injection = {
+      target: { tabId },
+      css: 'h1 { color: rgb(1, 2, 3) !important; }',
+    }
+    assert.deepEqual(await call('chrome.scripting.insertCSS', { args: [injection] }), {})
+    assert.equal((await call('Runtime.evaluate', {
+      expression: 'getComputedStyle(document.querySelector("h1")).color',
+    })).result.value, 'rgb(1, 2, 3)')
+    await call('chrome.scripting.removeCSS', { args: [injection] })
+    assert.notEqual((await call('Runtime.evaluate', {
+      expression: 'getComputedStyle(document.querySelector("h1")).color',
+    })).result.value, 'rgb(1, 2, 3)')
+    const injected = await call('chrome.scripting.executeScript', {
+      args: [{
+        target: { tabId },
+        files: ['probe.js'],
+      }],
+    })
+    assert.equal(injected[0].frameId, 0)
+    assert.equal(injected[0].result, 42)
+    assert.equal((await call('Runtime.evaluate', {
+      expression: 'document.querySelector("h1").dataset.injected',
+    })).result.value, 'yes')
+    assert.deepEqual(await call('chrome.storage.session.set', { args: [{ answer: 42 }] }, null), {})
+    assert.deepEqual(await call('chrome.storage.session.get', { args: ['answer'] }, null), { answer: 42 })
+    assert.deepEqual(await call('chrome.storage.session.get', {
+      args: ['answer'],
+      callback: true,
+    }, null), { answer: 42 })
+    assert.equal(typeof (await call('chrome.privacy.websites.referrersEnabled.get', {
+      args: [{}],
+    }, null)).value, 'boolean')
+    assert.ok((await call('chrome.management.getAll', {}, null)).some(extension => extension.id === record.extension_id))
+    assert.equal(await call('chrome.extension.isAllowedIncognitoAccess', {}, null), false)
+    assert.equal(await call('chrome.cookies.get', {
+      args: [{
+        url: 'http://127.0.0.1:' + page_server.addr.port,
+        name: 'missing-cookie',
+      }],
+    }, null), null)
+    await assert.rejects(call('chrome.tabs.get', { args: [-1] }, null), error => {
+      assert.match(error.cdp.error.message, /tab/i)
+      assert.equal(error.cause.req.method, 'chrome.tabs.get')
+      return true
+    })
+    await assert.rejects(call('chrome.missing.method', {}, null), error => !!error.cdp)
+    await assert.rejects(call('chrome.tabs.get', {
+      args: [-1],
+      callback: true,
+    }, null), error => /tab/i.test(error.cdp.error.message))
 
     await call('Runtime.enable')
     const binding = util.on_first(client, 'Runtime.bindingCalled')

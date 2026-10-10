@@ -172,13 +172,28 @@ function connect() {
     const { method, params = {}, sessionId, id } = request
     let response
     try {
-      if (sessionId == null && !methods[method]) throw new Error('Unsupported reverse browser command: ' + method)
-      const result = sessionId != null
-        ? await chrome.debugger.sendCommand(sessions[sessionId], method, params)
-        : await methods[method](params)
+      let result
+      if (method.startsWith('chrome.')) {
+        const names = method.split('.').slice(1)
+        const name = names.pop()
+        const object = names.reduce((object, name) => object[name], chrome)
+        const args = params.args ?? []
+        result = params.callback
+          ? await new Promise((resolve, reject) => object[name](...args, value => {
+            const error = chrome.runtime.lastError
+            if (error) reject(new Error(error.message))
+            else resolve(value)
+          }))
+          : await object[name](...args)
+      } else {
+        if (sessionId == null && !methods[method]) throw new Error('Unsupported reverse browser command: ' + method)
+        result = sessionId != null
+          ? await chrome.debugger.sendCommand(sessions[sessionId], method, params)
+          : await methods[method](params)
+      }
       response = {
         id,
-        result: result ?? {},
+        result: result === undefined ? {} : result,
       }
     } catch (error) {
       response = {

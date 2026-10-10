@@ -29,6 +29,8 @@ below remain supported. Publication metadata is isolated in `npm/`.
 - Attachment through WebSocket, HTTP discovery or a debugging port.
 - Optional Chrome extension reverse connections through one native Deno server,
   without browser remote-debugging arguments.
+- Generic `chrome.x.y` extension API calls on that connection, including scripting,
+  tabs/windows, cookies, storage, downloads and browser settings.
 - Shared initialization for concurrent calls; reconnection and target recreation
   on subsequent use, without replaying failed commands.
 - Public object mappings and directly replaceable custom method handlers.
@@ -129,7 +131,7 @@ connections or target/session routing.
 
 | Field | Meaning |
 | --- | --- |
-| `method` | Native name such as `Page.navigate`, or a custom name beginning with `_.`. |
+| `method` | Native name such as `Page.navigate`, a custom name beginning with `_.`, or an extension API name such as `chrome.tabs.query` in reverse mode. |
 | `params` | Native parameters plus the two routing fields below. Defaults to `{}`. |
 | `params.browser` | Browser label or configuration object with `name`. Defaults to `'main'`. |
 | `params.target` | Target label or configuration object with `name`. Omitted or `null` means a browser-level request. |
@@ -491,6 +493,90 @@ Browser-level `waitForDebuggerOnStart: true` returns an explicit error in revers
 mode: the extension cannot pause newly created root tabs before attachment.
 Keep its default false and create `about:blank`, finish setup, then navigate.
 Normal target-side `Target.setAutoAttach` is still native pass-through for children.
+
+### Chrome extension API commands
+
+In reverse mode, `chrome.<namespace>.<method>` calls the corresponding Chrome
+extension method directly, including nested objects such as
+`chrome.storage.session.get` and `chrome.privacy.websites.referrersEnabled.get`.
+There is no method registry or CDP-name translation. A name such as
+`Runtime.evaluate` still uses `chrome.debugger`; a name such as
+`chrome.debugger.getTargets` calls the extension API with its native signature.
+The same connection, request IDs, timeouts and RPC error envelopes handle both.
+These names are extension-only; direct CDP connections do not implement them.
+
+| Parameter | Meaning |
+| --- | --- |
+| `browser` | Usual manager browser label/configuration. |
+| `args` | Positional native arguments as a JSON array; defaults to `[]`. One object argument is `[object]`; two arguments are `[first, second]`. |
+| `callback` | Default `false`: await a native Promise or return a synchronous result. Set `true` for callback APIs: append a callback, await its first result and reject on `chrome.runtime.lastError`. |
+| `target` | Optional manager target selection/setup. It does not supply a native tab ID to the extension API. Put native `target` objects inside `args`. |
+
+```js
+const tabs = await client.call({
+  method: 'chrome.tabs.query',
+  params: {
+    browser: 'work',
+    args: [{}],
+  },
+})
+await client.call({
+  method: 'chrome.scripting.insertCSS',
+  params: {
+    browser: 'work',
+    args: [{
+      target: {
+        tabId: tabs[0].id,
+      },
+      css: 'body { background: white; }',
+    }],
+  },
+})
+await client.call({
+  method: 'chrome.storage.session.set',
+  params: {
+    browser: 'work',
+    args: [{
+      example: true,
+    }],
+  },
+})
+```
+
+Native arrays, objects, strings, booleans, numbers and `null` are returned directly;
+only `undefined` becomes `{}`. The method is called on its owning object, so nested
+API objects retain their native receiver. Arguments and results must be JSON data.
+Callbacks can only be supplied through `callback: true`; functions, event listeners,
+Ports, Blobs and other live/non-JSON objects have no remote representation.
+The bridge adds no extension event subscriptions.
+
+`chrome.scripting.executeScript` supports `files` relative to the loaded extension
+directory and returns the native array of frame results. A `func` cannot be sent
+over JSON; strings are not converted into functions and the worker does not use
+`eval`. Continue using CDP `Runtime.evaluate` for source expressions. The separately
+exposed `chrome.userScripts` API supports native source-code arguments, but Chrome
+requires its user toggle: Developer mode before Chrome 138, or Allow User Scripts
+on the extension's details page from Chrome 138 onward.
+
+The manifest grants `<all_urls>` host access and broad desktop extension API
+permissions for scripting/debugging, tabs/groups/sessions, bookmarks/history/reading
+list/search, cookies/content settings, storage, downloads, management, privacy/proxy,
+accessibility/font settings, alarms/idle/power, system information, notifications,
+context menus, capture, clipboard/geolocation access, identity, native messaging,
+messaging through GCM, offscreen documents, side panels, speech/engines,
+navigation/network requests and declarative rules.
+Its `action` declaration also enables `chrome.action` methods. The exact permission
+list is in [cdp_ext/manifest.json](cdp_ext/manifest.json); managed launches copy it.
+There are no per-method permission prompts added by the bridge.
+
+Permissions do not bypass Chrome's native restrictions: platform-specific,
+enterprise-only and channel-specific APIs are not enabled by this manifest, and
+Manifest V3's policy-only `webRequestBlocking` is not requested. User gestures,
+incognito/file-access grants, capture dialogs, native messaging host installations
+and required extension resources still apply. Unavailable methods and native errors
+reject normally. See the official [extension API reference](https://developer.chrome.com/docs/extensions/reference/api),
+[permission list](https://developer.chrome.com/docs/extensions/reference/permissions-list)
+and [scripting API](https://developer.chrome.com/docs/extensions/reference/api/scripting).
 
 ## Command-line arguments
 
@@ -1228,6 +1314,9 @@ library use needs no build or package installation; npm packaging is optional.
 The Deno test loads the real extension into two headless Chrome instances on one
 server port without remote-debugging arguments. It checks native/custom calls,
 Network events, bindings, child sessions, reconnect, detach/recreate and isolation.
+Extension API coverage checks granted permissions, positional arguments, nested
+API receivers, synchronous/Promise/callback results, CSS/script injection, storage,
+native errors and false/null/undefined results.
 Managed-launch coverage checks concurrent first use, profile-specific identity,
 connection timeout without process replacement, lazy listener startup/shutdown
 independent of direct browsers, and relaunch after confirmed exit. External reverse

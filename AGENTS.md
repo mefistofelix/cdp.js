@@ -91,6 +91,15 @@ child-process exit. Concurrent calls share the same initialization promise.
 
 `cdp_ext` translates only the documented browser-level command subset through
 Chrome tabs/debugger APIs; session commands use native `chrome.debugger`.
+Names beginning with `chrome.` invoke extension APIs through the same RPC transport,
+before CDP session dispatch. Resolve nested owners generically and preserve the
+receiver; `params.args` holds native positional arguments, including native target
+objects. Optional `params.callback` appends a callback and propagates
+`chrome.runtime.lastError`. Preserve native JSON results; normalize only undefined
+to `{}`. Do not add wrappers per API, source-string eval, automatic tab-ID injection
+or remote event subscriptions. The manifest declares broad desktop API permissions
+and host access; native Chrome availability, user gestures and resource requirements
+still apply. Generic extension calls must not change direct CDP dispatch.
 Root tab IDs and flattened native child sessions must stay distinct. The shared
 reverse envelope keeps `sessionId`: for roots it contains the stable stringified
 tab ID. Use one extension `sessions` object for roots (`{ tabId }`) and native
