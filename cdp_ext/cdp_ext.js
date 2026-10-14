@@ -18,6 +18,7 @@ function target_info(tab) {
     title: tab.title ?? '',
     url: tab.url ?? tab.pendingUrl ?? '',
     attached: !!attached[tab.id],
+    incognito: tab.incognito,
   }
 }
 
@@ -90,13 +91,29 @@ const methods = {
     auto_attach = params
   },
   async 'Target.createTarget'(params) {
-    if (Object.keys(params).some(key => !['url', 'background'].includes(key))) {
-      throw new Error('Reverse Target.createTarget supports only url and background')
+    if (Object.keys(params).some(key => !['url', 'background', 'incognito'].includes(key))) {
+      throw new Error('Reverse Target.createTarget supports only url, background and incognito')
     }
-    const tab = await chrome.tabs.create({
+    const options = {
       url: params.url ?? 'about:blank',
       active: params.background !== true,
-    })
+    }
+    let tab
+    if (params.incognito) {
+      if (!await chrome.extension.isAllowedIncognitoAccess()) {
+        throw new Error('Enable Allow in incognito for cdp_ext in chrome://extensions')
+      }
+      const window = (await chrome.windows.getAll()).find(window => window.incognito)
+      if (window) tab = await chrome.tabs.create({
+        ...options,
+        windowId: window.id,
+      })
+      else tab = (await chrome.windows.create({
+        incognito: true,
+        url: options.url,
+        focused: options.active,
+      })).tabs[0]
+    } else tab = await chrome.tabs.create(options)
     return { targetId: String(tab.id) }
   },
   async 'Target.attachToTarget'(params) {
@@ -159,6 +176,24 @@ chrome.tabs.onRemoved.addListener(id => {
     params: { targetId: String(id) },
   })
 })
+
+for (const [name, options] of Object.entries({
+  onBeforeRequest: [],
+  onBeforeSendHeaders: ['requestHeaders'],
+  onSendHeaders: ['requestHeaders'],
+  onHeadersReceived: ['responseHeaders'],
+  onAuthRequired: ['responseHeaders'],
+  onResponseStarted: ['responseHeaders'],
+  onBeforeRedirect: ['responseHeaders'],
+  onCompleted: ['responseHeaders'],
+  onErrorOccurred: [],
+})) {
+  chrome.webRequest[name].addListener(params => send({
+    method: 'chrome.webRequest.' + name,
+    params,
+    sessionId: params.tabId >= 0 ? String(params.tabId) : undefined,
+  }), { urls: ['<all_urls>'] }, options)
+}
 
 function connect() {
   if (disconnecting) return

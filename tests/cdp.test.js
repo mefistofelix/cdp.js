@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { getEventListeners } from 'node:events'
+import { getEventListeners, once } from 'node:events'
+import { createServer } from 'node:http'
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import api, { jsrpc, cdp, util, browser } from '../cdp.js'
@@ -337,6 +338,16 @@ test('raw jsrpc and existing browser attachment via WS, HTTP and port', { timeou
       ...options,
     })
     assert.ok(result.product)
+    if (options.websocket_url) {
+      assert.equal((await call(attached, 'Runtime.evaluate', { expression: '42' }, {
+        name: 'private',
+        context: 'temporary',
+      }, 'remote')).result.value, 42)
+      const context_id = attached.browsers.remote.contexts.temporary.browserContextId
+      await attached.close()
+      assert.ok(!(await owner.req({ method: 'Target.getBrowserContexts' })).browserContextIds.includes(context_id))
+      assert.ok((await owner.req({ method: 'Target.getTargets' })).targetInfos.some(info => info.targetId === target.targetId))
+    }
     await attached.close()
     assert.ok((await owner.req({ method: 'Browser.getVersion' })).product, 'disconnecting must preserve the browser')
   }
@@ -399,11 +410,13 @@ test('CLI options remain editable key/value objects until argv materialization',
     images: false,
     translations: true,
     login: true,
+    proxy: 'http://127.0.0.1:8080',
     args: {
       'mute-audio': false,
       'window-size': '800,600',
       'custom-switch': 'value with spaces',
       'custom-list': ['first', 'second'],
+      'proxy-server': 'socks5://127.0.0.1:1080',
     },
   })
   assert.equal(args.headless, 'new')
@@ -420,12 +433,179 @@ test('CLI options remain editable key/value objects until argv materialization',
   assert.ok(argv.includes('--window-size=800,600'))
   assert.ok(argv.includes('--new-switch'))
   assert.ok(argv.includes('--custom-list=first,second'))
+  assert.ok(argv.includes('--proxy-server=socks5://127.0.0.1:1080'))
   assert.ok(!argv.includes('--mute-audio'))
   assert.ok(!argv.some(arg => arg.startsWith('--custom-switch')))
   assert.equal(argv.filter(arg => arg.startsWith('--window-size=')).length, 1)
   assert.ok(Object.keys(args).every(key => !key.startsWith('--')))
   assert.ok(!util.args_to_strings(browser.build_args({ user_data_dir: null }))
     .some(arg => arg.startsWith('--user-data-dir')))
+  assert.equal(browser.build_args({ proxy: false })['no-proxy-server'], true)
+  assert.equal(browser.build_args({ proxy: null })['no-proxy-server'], undefined)
+  assert.equal(browser.build_args().hasOwnProperty('proxy-server'), false)
+  assert.equal(browser.build_args({
+    proxy: false,
+    args: { 'no-proxy-server': false },
+  })['no-proxy-server'], false)
+})
+
+test('browser proxies and named contexts route traffic and manage lifetime independently', { timeout: 60000 }, async t => {
+  const proxies = []
+  for (const name of ['first', 'second']) {
+    const requests = []
+    const server = createServer((request, response) => {
+      requests.push(request.url)
+      const headers = { 'content-type': 'text/html' }
+      const pathname = new URL(request.url).pathname
+      if (pathname !== '/favicon.ico') headers['set-cookie'] = 'scope=' + pathname.slice(1) + '; Path=/'
+      response.writeHead(200, headers)
+      response.end('<h1>' + name + '</h1>')
+    })
+    server.listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    t.after(async () => {
+      server.closeAllConnections()
+      await new Promise(resolve => server.close(resolve))
+    })
+    proxies.push({
+      url: 'http://127.0.0.1:' + server.address().port,
+      requests,
+    })
+  }
+  const client = await fixture(t, { proxy: proxies[0].url })
+  const navigate = async (target, pathname, browser = 'main') => {
+    await call(client, 'Runtime.evaluate', { expression: '0' }, target, browser)
+    const loaded = util.on_first(client, 'Page.loadEventFired')
+    await call(client, 'Page.navigate', {
+      url: 'http://proxy-test.invalid/' + pathname,
+    }, target, browser)
+    await loaded
+    return (await call(client, 'Runtime.evaluate', {
+      expression: 'document.querySelector("h1").textContent',
+      returnByValue: true,
+    }, target, browser)).result.value
+  }
+  assert.equal(await navigate('global', 'browser'), 'first')
+  assert.equal(await navigate('global', 'other', {
+    name: 'other',
+    proxy: proxies[1].url,
+  }), 'second')
+  assert.ok(client.browsers.main.proc.spawnargs.includes('--proxy-server=' + proxies[0].url))
+  assert.ok(client.browsers.other.proc.spawnargs.includes('--proxy-server=' + proxies[1].url))
+
+  const targets = proxies.map((proxy, index) => ({
+    name: 'context-' + index,
+    context: {
+      name: index === 0 ? '__proto__' : 'second',
+      proxy: proxy.url,
+    },
+  }))
+  await Promise.all(targets.map(target => call(client, 'Runtime.evaluate', { expression: '0' }, target)))
+  const contexts = Object.values(client.browsers.main.contexts)
+  assert.equal(contexts.length, 2)
+  assert.equal(Object.getPrototypeOf(client.browsers.main.contexts), null)
+  for (let index = 0; index < targets.length; index++) {
+    const target = targets[index]
+    assert.deepEqual((await call(client, 'Network.getCookies', {
+      urls: ['http://proxy-test.invalid/'],
+    }, target)).cookies, [], 'new contexts do not inherit profile cookies')
+    assert.equal(await navigate(target, 'context-' + index), ['first', 'second'][index])
+    const info = (await call(client, 'Target.getTargetInfo', {
+      targetId: client.browsers.main.targets[target.name].targetId,
+    }, null)).targetInfo
+    assert.equal(info.browserContextId, client.browsers.main.contexts[target.context.name].browserContextId)
+  }
+  assert.equal((await call(client, 'Network.getCookies', {
+    urls: ['http://proxy-test.invalid/'],
+  }, 'global')).cookies.find(cookie => cookie.name === 'scope').value, 'browser')
+  assert.ok(proxies[0].requests.includes('http://proxy-test.invalid/context-0'))
+  assert.ok(proxies[1].requests.includes('http://proxy-test.invalid/context-1'))
+  assert.ok(!proxies[0].requests.includes('http://proxy-test.invalid/context-1'))
+  const shared = Object.freeze({
+    name: 'shared',
+    context: '__proto__',
+  })
+  await Promise.all([
+    call(client, 'Runtime.evaluate', { expression: '0' }, shared),
+    call(client, 'Runtime.evaluate', { expression: '0' }, shared),
+  ])
+  const record = client.browsers.main
+  const first = record.contexts.__proto__
+  const first_id = first.browserContextId
+  assert.equal((await call(client, 'Target.getBrowserContexts', {}, null)).browserContextIds.length, 2)
+  const race_targets = ['race-first', 'race-second'].map(name => ({
+    name,
+    context: 'race',
+  }))
+  await Promise.all(race_targets.map(target => call(client, 'Runtime.evaluate', { expression: '42' }, target)))
+  assert.equal((await call(client, 'Target.getBrowserContexts', {}, null)).browserContextIds.length, 3,
+    'concurrent target creation shares one context')
+  await Promise.all(race_targets.map(target => call(client, 'Target.closeTarget', {
+    targetId: record.targets[target.name].targetId,
+  }, null)))
+  assert.equal(record.contexts.race.browserContextId, null)
+  assert.equal((await call(client, 'Network.getCookies', {
+    urls: ['http://proxy-test.invalid/'],
+  }, shared)).cookies.find(cookie => cookie.name === 'scope').value, 'context-0')
+  const target_id = record.targets.shared.targetId
+  const disconnected = util.on_first(client, 'close')
+  record.socket.close()
+  await disconnected
+  assert.equal((await call(client, 'Runtime.evaluate', { expression: '42' }, shared)).result.value, 42)
+  assert.equal(record.targets.shared.targetId, target_id)
+  assert.equal(first.browserContextId, first_id, 'disconnect keeps a live context and its tabs')
+
+  const popup = await call(client, 'Target.createTarget', {
+    url: 'about:blank',
+    browserContextId: first_id,
+  }, null)
+  await call(client, 'Target.closeTarget', { targetId: record.targets['context-0'].targetId }, null)
+  assert.equal(first.browserContextId, first_id, 'a shared tab retains the context')
+  await call(client, 'Target.closeTarget', { targetId: record.targets.shared.targetId }, null)
+  assert.equal(first.browserContextId, first_id, 'unselected pages also retain the context')
+  const context_closed = util.on_first(client, 'context_closed')
+  await call(client, 'Target.closeTarget', popup, null)
+  assert.equal((await context_closed).args[0].detail.context, '__proto__')
+  assert.equal(first.browserContextId, null, 'the last target closes its context')
+  assert.equal(await navigate(shared, 'recreated'), 'first')
+  assert.notEqual(first.browserContextId, first_id)
+  await call(client, 'Target.disposeBrowserContext', { browserContextId: first.browserContextId }, null)
+  assert.equal(record.targets.shared.sessionId, null, 'explicit context disposal invalidates its sessions')
+  assert.equal(await navigate(targets[1], 'surviving'), 'second')
+  assert.equal(await navigate(shared, 'after-dispose'), 'first')
+
+  const private_target = {
+    name: 'private',
+    incognito: true,
+  }
+  assert.deepEqual((await call(client, 'Network.getCookies', {
+    urls: ['http://proxy-test.invalid/'],
+  }, private_target)).cookies, [])
+  assert.ok(record.contexts.incognito.browserContextId)
+  await call(client, 'Network.setCookie', {
+    name: 'private',
+    value: 'yes',
+    url: 'http://proxy-test.invalid/',
+  }, private_target)
+  assert.equal((await call(client, 'Network.getCookies', {
+    urls: ['http://proxy-test.invalid/'],
+  }, {
+    name: 'private-other',
+    incognito: true,
+  })).cookies.find(cookie => cookie.name === 'private').value, 'yes')
+  assert.equal((await call(client, 'Network.getCookies', {
+    urls: ['http://proxy-test.invalid/'],
+  }, 'global')).cookies.some(cookie => cookie.name === 'private'), false)
+
+  await assert.rejects(call(client, 'Runtime.evaluate', { expression: '0' }, {
+    name: 'invalid',
+    context: 'retry',
+    create_params: { width: 'invalid' },
+  }), error => !!error.cdp)
+  await record.context_checking
+  assert.equal(record.contexts.retry.browserContextId, null, 'failed creation releases an empty context')
+  record.targets.invalid.create_params = {}
+  assert.equal((await call(client, 'Runtime.evaluate', { expression: '42' }, 'invalid')).result.value, 42)
 })
 
 test('manager without a user-data directory skips preference writes', async t => {

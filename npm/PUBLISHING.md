@@ -12,7 +12,7 @@ The copies are ignored by Git. There is no compilation, build script, or wrapper
 ## Release through GitHub
 
 OIDC is configured for this package and the [npm workflow](../.github/workflows/npm.yml).
-Version `0.1.0` is already published. For the next release:
+For the next release:
 
 1. Update `version` in `npm/package.json` and review the changes.
 2. Run the local checks below. Inspect the package if its contents changed.
@@ -34,7 +34,10 @@ Use Node.js 22.19 or later, npm, and an installed Chromium-family browser:
 
 ```sh
 node --check cdp.js
+node --check cdp_ext/cdp_ext.js
 node --test tests/cdp.test.js
+deno test -A tests/reverse.test.js
+git diff --check
 ```
 
 Copy the library, README and extension from the repository root. In PowerShell:
@@ -62,6 +65,11 @@ The archive must contain exactly `package.json`, `cdp.js`, `README.md`,
 The manifest's `files` allowlist includes the sources; npm includes the manifest
 and README automatically. Tests, profiles, tools, and local references stay out.
 Use `npm pack ./npm` to create a local archive if needed.
+For releases affecting reverse mode, install that archive into a disposable
+directory and exercise a managed `cdp_ext: true` launch under Deno from the
+installed entry point. The manager must find both packaged extension files and
+write its profile-specific copy automatically. Check the copied worker bytes and
+the copied manifest's server URL; it must not depend on repository source paths.
 
 ## Authentication and trusted publisher
 

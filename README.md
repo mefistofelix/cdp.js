@@ -21,11 +21,18 @@ import api, { util, jsrpc, browser, cdp } from '@mefistofelix/cdp.js'
 
 The npm package exports the same file and API. Direct file imports in the examples
 below remain supported. Publication metadata is isolated in `npm/`.
+The package includes both `cdp_ext/` files. With `cdp_ext: true`, the manager
+writes a configured extension copy into the browser's profile directory and loads
+it automatically; no manual extraction or build is needed. Reverse mode still
+requires Deno. In Deno, import from `npm:@mefistofelix/cdp.js`.
 
 ## Features and scope
 
 - Native CDP requests through `call({ method, params })`, with native results.
 - Named browsers and targets, created and connected on demand.
+- Browser proxies and named direct-mode contexts with independent proxies/storage
+  and automatic cleanup after their last target closes.
+- Incognito targets in direct and reverse modes.
 - Attachment through WebSocket, HTTP discovery or a debugging port.
 - Optional Chrome extension reverse connections through one native Deno server,
   without browser remote-debugging arguments.
@@ -35,12 +42,14 @@ below remain supported. Publication metadata is isolated in `npm/`.
   on subsequent use, without replaying failed commands.
 - Public object mappings and directly replaceable custom method handlers.
 - Configurable target initialization, JavaScript bindings and direct events.
+- Reverse network notifications through CDP Network or extension webRequest,
+  including observation without debugger attachment.
 - XPath `_.click` and `_.find`, including two XPath expression rewrites.
 - Configurable browser launch arguments and profile preferences.
 - Raw WebSocket JSON-RPC transport and reusable static helpers.
 
 There is no Page class, batch API, image-processing helper, event buffer/filter
-API or database. Browser, target and session mappings live in memory. Chromium
+API or database. Browser, context, target and session mappings live in memory. Chromium
 profiles and their preferences are ordinary files on disk. Any native CDP method
 supported by the connected browser remains available through direct `call`.
 The optional extension transport has the command/domain limits documented below.
@@ -217,6 +226,7 @@ local configuration.
 | `windowsHide` | boolean, effective headless mode | Hide the spawned process's console on Windows. Defaults to true when the final arguments include `--headless`, false otherwise; an explicit value wins. Does not hide the parent terminal. |
 | `extensions` | boolean or array of directory strings, `false` | True enables normal profile extensions. An array also generates `disable-extensions-except` to load the listed local directories at startup; include `'*'` to retain enabled profile extensions. False adds the two extension-disabling switches. |
 | `images` | boolean, `true` | When false, request `blink-settings: 'imagesEnabled=false'`; controls loading, not image processing. |
+| `proxy` | string or `false`, unset | A string generates `proxy-server` using native Chromium syntax; false generates `no-proxy-server`. Unset/null adds neither flag. Applies at launch, including managed extension launches. |
 | `translations` | boolean, `false` | Set translation preferences and, unless true, disable translation feature IDs. |
 | `login` | boolean, `false` | Set browser sign-in preferences and, unless true, disable sync and sign-in promotions. Does not prevent website login. |
 | `args` | object, `{}` | Raw CLI overrides applied after generated defaults; keys omit `--`. |
@@ -283,6 +293,194 @@ socket and leaves that browser running.
 
 `port: 9222` means **attach**. To **launch** on that port, use
 `args: { 'remote-debugging-port': 9222 }` without an attachment endpoint.
+
+## Proxy configuration
+
+Set `proxy` in constructor browser defaults, a per-browser `params.browser`
+object, or standalone `browser.launch` options:
+
+```js
+const client = new cdp({
+  proxy: 'http://127.0.0.1:8080',
+})
+await client.call({
+  method: 'Page.navigate',
+  params: {
+    browser: {
+      name: 'socks',
+      proxy: 'socks5://127.0.0.1:1080',
+    },
+    target: 'page',
+    url: 'https://example.com/',
+  },
+})
+await client.close()
+```
+
+`proxy: false` requests direct connections through `--no-proxy-server`.
+Unset/null adds no proxy flags, preserving Chrome's system/profile selection.
+Configuration is recorded on first use of a browser label and applies at launch;
+it does not change an already running or externally attached browser.
+HTTP, HTTPS and SOCKS proxy syntax passes through unchanged. Credentials embedded
+in proxy URLs are not supported by Chrome; use native authentication instead.
+The library does not add an authentication responder.
+
+Raw `args` override generated keys independently. Use them for other proxy
+controls, including bypass rules and PAC:
+
+```js
+const client = new cdp({
+  args: {
+    'proxy-server': 'http://127.0.0.1:8080',
+    'proxy-bypass-list': '*.internal.example;localhost',
+  },
+})
+// Alternatively: args: { 'proxy-pac-url': 'https://example.com/proxy.pac' }
+await client.close()
+```
+
+Native proxy rules can use semicolon-separated strings; the generic CLI converter
+still comma-joins every array. Bypass lists accept both separators. Chrome gives
+`no-proxy-server` precedence, so overriding `proxy-server` alone does not cancel
+that flag; override `args['no-proxy-server']: false` too if needed.
+Browser proxy options affect Chrome traffic, not Node/Deno's endpoint discovery
+or CDP transport. Chrome normally bypasses loopback addresses. To proxy them,
+use `args['proxy-bypass-list']: '<-loopback>'`; in reverse mode keep the extension's
+local WebSocket listener reachable. The library inserts no extra bypass rule.
+See [Chromium proxy configuration](https://chromium.googlesource.com/chromium/src/+/HEAD/net/docs/proxy.md)
+and [proxy switches](https://www.chromium.org/developers/design-documents/network-settings/).
+
+### Named contexts and different tab proxies
+
+Direct CDP supports separate proxies and storage through browser contexts.
+Configure a named context on its first target, then reference that name on other
+targets in the same browser:
+
+```js
+await client.call({
+  method: 'Page.navigate',
+  params: {
+    browser: 'main',
+    target: {
+      name: 'proxied-tab',
+      context: {
+        name: 'tenant-a',
+        proxy: 'http://127.0.0.1:8081',
+        create_params: {
+          proxyBypassList: '*.internal.example',
+        },
+      },
+    },
+    url: 'https://example.com/',
+  },
+})
+await client.call({
+  method: 'Page.navigate',
+  params: {
+    browser: 'main',
+    target: {
+      name: 'another-tab',
+      context: 'tenant-a',
+    },
+    url: 'https://example.com/another',
+  },
+})
+```
+
+| Context option | Default | Meaning |
+| --- | --- | --- |
+| `name` | required in an object | Label in this browser's public `contexts` object. A previously unused string label creates a context with native defaults. |
+| `proxy` | unset | Native context proxy override. String sets `proxyServer`; false sets `'direct://'`; unset/null uses Chrome's native selection. |
+| `create_params` | `{}` | Native `Target.createBrowserContext` parameters, overriding the generated `proxyServer`. |
+
+Configuration is recorded on first use of the context label. Context names are
+scoped to a browser; constructor options remain browser defaults. Concurrent
+targets sharing a name create one native context. There is no `target.proxy`
+option: put proxy settings on `target.context`.
+
+Contexts have private cookies/storage and do not inherit ordinary-profile website
+logins. Tabs sharing a context share its storage and proxy. Existing physical tabs
+cannot move between contexts; specifying a context for an existing target in
+another context rejects. Native proxy fields are experimental and unsupported
+browsers return normal CDP errors.
+
+The manager disposes a named context after its last application target disappears.
+It checks native targets, including unselected popups/workers, and waits for pending
+target initialization. Internal Chrome `browser_ui` targets do not retain it.
+Cleanup follows destruction events and can finish after `Target.closeTarget`
+returns. The `context_closed` event signals completion. Cleanup failures emit
+`error` with `{ browser, error }`; the context remains available for a later attempt.
+The logical record remains in `record.contexts`; its `browserContextId` becomes
+null. Reusing the name creates a fresh private context with the recorded options.
+Socket reconnection preserves a surviving native context; browser restart creates
+a new one. Context maps are in memory, not written to profile files.
+
+`client.close()` disposes managed contexts, including their tabs in externally
+attached browsers, while preserving other external tabs and unmanaged contexts.
+You can also call `Target.disposeBrowserContext` with the ID from
+`client.browsers.main.contexts['tenant-a'].browserContextId`; managed state is
+invalidated when that call succeeds. Raw native context creation remains available:
+pass its ID through `target.create_params.browserContextId` and dispose it yourself.
+Do not combine that raw ID with `target.context`. No automatic `disposeOnDetach`
+option is added. See the native
+[Target context API](https://chromedevtools.github.io/devtools-protocol/tot/Target/#method-createBrowserContext).
+
+Named contexts reject explicitly in both reverse attachment and managed extension
+mode. Chrome's extension/debugger APIs cannot create independent browser contexts.
+Launch-time `proxy`/raw CLI flags work with `cdp_ext: true`. For changes through
+an already connected extension, the existing generic `chrome.proxy.settings`
+methods accept native `params.args`:
+
+```js
+await client.call({
+  method: 'chrome.proxy.settings.set',
+  params: {
+    browser: 'work',
+    args: [{
+      value: {
+        mode: 'fixed_servers',
+        rules: {
+          singleProxy: {
+            scheme: 'http',
+            host: '127.0.0.1',
+            port: 8080,
+          },
+        },
+      },
+      scope: 'regular',
+    }],
+  },
+})
+```
+
+The extension already declares `proxy` permission. ChromeSetting scopes apply to
+profiles/incognito, not individual tabs. `scope: 'regular'` can persist the setting
+in the profile. Use the appropriate native scope or explicitly call
+`chrome.proxy.settings.clear` with the same scope. Policy/extension conflicts are
+reported by `chrome.proxy.settings.get`. See the
+[Chrome proxy API](https://developer.chrome.com/docs/extensions/reference/api/proxy).
+
+### Incognito targets
+
+Set `target: { name: 'private', incognito: true }` to create a private target.
+The default is false. In direct mode, this selects the shared named context
+`'incognito'` unless an explicit `context` or raw `create_params.browserContextId`
+was supplied. All named CDP contexts are already private. Use different context
+names for independent private sessions or proxies.
+
+In reverse mode, this creates a native incognito tab, reusing an existing incognito
+window or opening one. Enable **Allow in incognito** for the bridge in
+`chrome://extensions` first; otherwise creation returns an explicit error.
+The manifest's `incognito: 'spanning'` setting does not grant this user permission,
+and the library never enables it automatically. Existing regular targets cannot
+be changed into incognito targets. `create_params.incognito` is the native reverse
+creation override; the high-level `incognito` flag also checks existing targets.
+
+All native Chrome incognito windows share one private session. Storage clears
+when the last incognito window closes; these are not independent named contexts.
+Reverse incognito does not add per-tab proxies. The generic `chrome.proxy` API
+can configure its native incognito scope. See
+[Chrome incognito behavior](https://support.google.com/chrome/answer/95464).
 
 ## Reverse Chrome extension transport
 
@@ -475,7 +673,7 @@ The extension adapts browser-level `Target.getTargets`, `getTargetInfo`,
 `detachFromTarget`, `closeTarget` and `activateTarget` to Chrome tab/debugger APIs.
 Discovery lists tabs; attaching a selected tab exposes its native child target
 events and flattened sessions. It does not attach every unselected tab.
-`createTarget` accepts only `url` and `background`; `activateTarget` selects the
+`createTarget` accepts only `url`, `background` and `incognito`; `activateTarget` selects the
 tab and focuses its window. `Browser.getVersion` returns product/user-agent data;
 its protocol version is `1.3`, with empty `revision` and `jsVersion` fields.
 Other browser-level commands return explicit unsupported-command errors.
@@ -548,7 +746,8 @@ only `undefined` becomes `{}`. The method is called on its owning object, so nes
 API objects retain their native receiver. Arguments and results must be JSON data.
 Callbacks can only be supplied through `callback: true`; functions, event listeners,
 Ports, Blobs and other live/non-JSON objects have no remote representation.
-The bridge adds no extension event subscriptions.
+The bridge forwards the network notifications documented below. It does not
+provide generic remote registration of other extension event listeners.
 
 `chrome.scripting.executeScript` supports `files` relative to the loaded extension
 directory and returns the native array of frame results. The bridge also accepts
@@ -772,6 +971,8 @@ and [content switches](https://raw.githubusercontent.com/chromium/chromium/main/
 | `disable-component-extensions-with-background-pages` | same condition | Disable those component extensions. |
 | `disable-extensions-except` | the `extensions` array, otherwise unset | Load local directories and exclude other normal extensions. Raw overrides win. |
 | `blink-settings` | `'imagesEnabled=false'` when `images` is false | Disable image loading through Blink settings. |
+| `proxy-server` | `proxy` when it is a string | Configure the launched browser's proxy using native Chromium syntax. |
+| `no-proxy-server` | `true` when `proxy` is false | Request direct connections; Chrome gives this flag precedence over other proxy flags. |
 | `disable-signin-promo-on-avatar-pill-for-testing` | `true` unless `login` is true | Suppress the avatar sign-in promotion. |
 | `disable-sync` | same condition | Disable browser sync. |
 
@@ -994,6 +1195,9 @@ See [Chrome's debugging-port restrictions](https://developer.chrome.com/blog/rem
 | `extensions: ['*', directory]` | Select enabled profile extensions plus the explicit local directory before startup. |
 | An `extensions` array plus a raw `disable-extensions-except` | The raw selection replaces the generated array; null/false suppresses that selection. |
 | `images: false` plus an overridden `blink-settings` | Replace the whole string; image disabling is not appended to the caller's value. |
+| A string `proxy` plus `args['proxy-server']` | The raw proxy-server value replaces the generated one. |
+| `proxy: false` plus only `args['proxy-server']` | Retain `no-proxy-server`; Chrome still selects direct connections. Override `args['no-proxy-server']: false` to remove it. |
+| `proxy` plus an attachment endpoint | The launch option is unused; no running browser proxy is changed. |
 | `translations: false` plus `preferences['translate.enabled']: true` | Store true in the profile, while generated translation-disabling feature IDs remain on the CLI. |
 | `login: true` plus `args['disable-sync']: true` | Allow profile sign-in through generated preferences while still requesting sync to be disabled. |
 | Any high-level settings plus a raw `disable-features` array | Replace the generated list, including translation/sign-in additions; an active `disable-extensions-except` still appends its required feature ID. |
@@ -1053,6 +1257,8 @@ await client.call({
 | --- | --- | --- |
 | `name` | required in an object | Logical label in this browser's `targets` mapping. |
 | `targetId` | `null` | Optional existing physical target ID. Reused if discovered; otherwise create a new target. |
+| `context` | unset | Direct-mode context name or first-use configuration object; see named contexts above. Reverse mode rejects this option. |
+| `incognito` | `false` | Create/select a private target; direct mode uses the shared `'incognito'` context by default, reverse uses a native incognito window with the user's extension grant. |
 | `create_params` | `{}` | Native creation overrides, merged over `url: 'about:blank'` and `background: true`; start from a blank target without requesting foreground activation. |
 | `initialize` | `true` | Run the convenience setup sequence; false skips it. |
 | `runtime` | `'bootstrap'` | Enable Runtime for setup, then disable reporting. `true` leaves it enabled; `false` skips both operations. |
@@ -1225,6 +1431,46 @@ browser/target resolution, may be synchronous or asynchronous, and define their
 own return value. Their exceptions propagate. An unregistered `_.` name rejects
 without launching a browser.
 
+## Reverse network notifications
+
+Reverse mode exposes two independent streams through the same JSON-RPC connection:
+
+| Stream | Debugger required | Data |
+| --- | --- | --- |
+| `Network.*` | Yes | Native CDP events after `Network.enable`, normally enabled by target setup. Native commands can retrieve response bodies where supported. |
+| `chrome.webRequest.*` | No | Native extension request lifecycle details for accessible tabs, including request/response headers. No response bodies or WebSocket frames. |
+
+The extension always forwards `onBeforeRequest`, `onBeforeSendHeaders`,
+`onSendHeaders`, `onHeadersReceived`, `onAuthRequired`, `onResponseStarted`,
+`onBeforeRedirect`, `onCompleted` and `onErrorOccurred` under the
+`chrome.webRequest.` prefix while connected. `network: false` skips debugger
+Network setup but does not disable this extension stream. No debugger attachment
+is required to observe a tab created/navigated through `chrome.tabs` calls.
+
+```js
+client.addEventListener('chrome.webRequest.onCompleted', event => {
+  const { browser, target, tabId, requestId, url, statusCode } = event.detail
+  console.log(browser, target, tabId, requestId, url, statusCode)
+})
+```
+
+Raw notifications have `{ method, params, sessionId }` and no request `id`.
+`params` contains native Chrome details. When `tabId >= 0`, `sessionId` is its
+string form, allowing normal manager routing even without a debugger session.
+Requests with `tabId: -1` have no target routing reference. Browser labels are
+added by the manager; target labels are added only for known logical targets.
+`requestId` belongs to the extension API and is not a CDP Network request ID.
+Raw socket notifications remain unchanged.
+
+The manifest includes `webRequest`, `webRequestAuthProvider` and `<all_urls>`.
+`onAuthRequired` is observation only: no authentication response is supplied.
+Incognito traffic requires the bridge's **Allow in incognito** grant. Chrome
+restrictions, cached requests and protected URLs can limit visibility. Sensitive
+headers and some preflights require native `extraHeaders`, which this stream does
+not request. There is no library filtering, buffering, replay, interception or
+generic remote event registration; disconnected notifications are dropped.
+See the [Chrome webRequest API](https://developer.chrome.com/docs/extensions/reference/api/webRequest).
+
 ## Events and bindings
 
 | Emitter / event | `event.detail` |
@@ -1232,6 +1478,9 @@ without launching a browser.
 | `client`, `notify` | CDP message with browser and, when known, target labels added to `params`. |
 | `client`, native method such as `Runtime.bindingCalled` | That message's routed parameters. |
 | `client`, `close` | `{ browser, code }` for closure of the current browser socket. |
+| `client`, `context_closed` | `{ browser, context, browserContextId }` after successful managed context disposal. |
+| `client`, `error` | `{ browser, error }` when asynchronous managed context cleanup fails. |
+| `client`, `chrome.webRequest.*` | Native extension request details with browser and, when known, target labels. Reverse only; does not require debugger attachment. |
 | `socket`, `notify` | The unmodified CDP notification from the raw transport. |
 
 Labels are strings, not record objects. Native `sessionId` remains available on
@@ -1289,6 +1538,8 @@ dictionary containers have a null prototype.
 | `record.proc` | Owned child process; absent for external attachment. |
 | `record.connecting` | In-progress connection promise, cleared after settlement. |
 | `record.targets[label]` | Target options, physical `targetId`, `sessionId`, `connecting` and `setup_errors` after setup. |
+| `record.contexts[name]` | Recorded context options, native `browserContextId` or null, and pending `connecting`/`closing` promises. Direct mode only. |
+| `record.context_checking` | Pending automatic empty-context cleanup, otherwise unset/null. |
 | `record.target_info[targetId]` | Discovered native target info plus cached `sessionId` when attached. |
 | `record.session_targets[sessionId]` | Physical `targetId` for a session. |
 | `socket.pending[id]` | Response-wait promise, removed on completion. |
@@ -1372,6 +1623,9 @@ labels, target labels, custom methods or reconnection policy in this layer.
 | Unknown `_.` handler | Reject before browser creation. |
 | Invalid profile JSON or filesystem failure | Propagate the parsing/filesystem error. |
 | Failed discovery or local launch | Reject the call establishing the connection. |
+| Named context in reverse mode | Reject explicitly; no separate process emulation. |
+| Reverse incognito without the extension's user grant | Reject with an instruction to enable Allow in incognito. |
+| Automatic context cleanup fails | Emit the manager's `error` event with browser label and original error. |
 
 ```js
 try {
@@ -1405,6 +1659,7 @@ two `cdp_ext/` files into `npm/` alongside its manifest; no build script is need
 
 ```sh
 node --check cdp.js
+node --check cdp_ext/cdp_ext.js
 node --test tests/cdp.test.js
 deno test -A tests/reverse.test.js
 ```
@@ -1414,7 +1669,11 @@ Integration tests launch local headless Chromium with disposable profiles under
 library use needs no build or package installation; npm packaging is optional.
 The Deno test loads the real extension into two headless Chrome instances on one
 server port without remote-debugging arguments. It checks native/custom calls,
-Network events, bindings, child sessions, reconnect, detach/recreate and isolation.
+Network events, webRequest notifications without debugger attachment, bindings,
+child sessions, reconnect, detach/recreate, incognito and isolation.
+Node coverage also checks actual browser/context proxy routing, shared private
+storage, concurrent context creation, automatic disposal, unselected targets and
+context ownership in externally attached browsers.
 Extension API coverage checks granted permissions, positional arguments, nested
 API receivers, synchronous/Promise/callback results, CSS/script injection, storage,
 native validation errors and false/null/undefined results. Function-injection checks
@@ -1423,9 +1682,9 @@ string-function adapter and async arguments/results. Real page CSP checks cover
 both evaluators in both worlds, explicit debugger bypass after reload, and explicit
 header removal through session rules. User-script checks cover default denied
 access and explicit activation, DOM changes and Promise results under restrictive
-page CSP. Only the disposable profile's toggle preparation uses direct CDP to
-operate Chrome's extensions settings; the subsequent reverse execution uses no
-remote-debugging flags and does not automatically enable the toggle.
+page CSP. Only disposable-profile preparation uses direct CDP to operate Chrome's
+Allow User Scripts and Allow in incognito toggles; subsequent reverse execution
+uses no remote-debugging flags and never enables these grants automatically.
 Managed-launch coverage checks concurrent first use, profile-specific identity,
 connection timeout without process replacement, lazy listener startup/shutdown
 independent of direct browsers, and relaunch after confirmed exit. External reverse

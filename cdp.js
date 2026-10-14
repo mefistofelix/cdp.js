@@ -193,6 +193,8 @@ export class browser {
       ]
     }
     if (options.images === false) args['blink-settings'] = 'imagesEnabled=false'
+    if (options.proxy === false) args['no-proxy-server'] = true
+    else if (options.proxy != null) args['proxy-server'] = options.proxy
     if (options.translations !== true) {
       args['disable-features'].push('Translate', 'TranslateToast', 'EnableTranslatePdf')
     }
@@ -434,7 +436,8 @@ export class cdp extends EventTarget {
       browser: browser.name,
     }
     const sessionId = params.sessionId || message.sessionId
-    const targetId = params.targetInfo?.targetId || params.targetId || browser.session_targets[sessionId]
+    const targetId = params.targetInfo?.targetId || params.targetId || browser.session_targets[sessionId] ||
+      (params.tabId >= 0 ? String(params.tabId) : undefined)
     const target = Object.values(browser.targets).find(value => value.targetId === targetId)
     if (params.targetInfo) {
       Object.assign(browser.target_info[targetId] ??= {}, params.targetInfo)
@@ -455,7 +458,92 @@ export class cdp extends EventTarget {
     if (['Target.targetDestroyed', 'Target.targetCrashed'].includes(message.method)) {
       this._detach(browser, info?.sessionId)
       delete browser.target_info[targetId]
+      this._close_contexts_if_idle(browser)
     }
+  }
+
+  async _context(browser, spec) {
+    if (typeof spec === 'string') spec = { name: spec }
+    const context = browser.contexts[spec.name] ??= {
+      ...spec,
+      browserContextId: null,
+    }
+    await context.closing
+    if (!context.browserContextId) {
+      context.connecting ??= browser.socket.req({
+        method: 'Target.createBrowserContext',
+        params: {
+          proxyServer: context.proxy === false ? 'direct://' : context.proxy,
+          ...context.create_params,
+        },
+      }).then(result => {
+        context.browserContextId = result.browserContextId
+      }).finally(() => {
+        context.connecting = null
+      })
+      await context.connecting
+    }
+    return context
+  }
+
+  _dispose_context(browser, context, params = { browserContextId: context.browserContextId }) {
+    const id = context.browserContextId
+    return context.closing ??= browser.socket.req({
+      method: 'Target.disposeBrowserContext',
+      params,
+    }).then(result => {
+      context.browserContextId = null
+      for (const [targetId, info] of Object.entries(browser.target_info)) {
+        if (info.browserContextId !== id) continue
+        this._detach(browser, info.sessionId)
+        delete browser.target_info[targetId]
+      }
+      util.emit(this, 'context_closed', {
+        browser: browser.name,
+        context: context.name,
+        browserContextId: id,
+      })
+      return result
+    }).finally(() => {
+      context.closing = null
+    })
+  }
+
+  _close_contexts_if_idle(browser) {
+    if (browser.context_checking) {
+      browser.context_check_pending = true
+      return browser.context_checking
+    }
+    if (browser.connecting || browser.closing || browser.socket?.readyState !== WebSocket.OPEN) return
+    const contexts = Object.values(browser.contexts).filter(context =>
+      context.browserContextId && !context.connecting && !context.closing &&
+      !Object.values(browser.target_info).some(info =>
+        info.type !== 'browser_ui' && info.browserContextId === context.browserContextId,
+      ),
+    )
+    if (!contexts.length) return
+    const socket = browser.socket
+    return browser.context_checking = (async () => {
+      do {
+        browser.context_check_pending = false
+        const { targetInfos } = await socket.req({ method: 'Target.getTargets' })
+        if (browser.socket !== socket || browser.closing) return
+        for (const context of Object.values(browser.contexts)) {
+          if (!context.browserContextId || context.connecting || context.closing) continue
+          const belongs = info => info.type !== 'browser_ui' && info.browserContextId === context.browserContextId
+          if (targetInfos.some(belongs) || Object.values(browser.target_info).some(belongs)) continue
+          if (Object.values(browser.targets).some(target =>
+            target.connecting && (target.context?.name ?? target.context) === context.name,
+          )) continue
+          await this._dispose_context(browser, context)
+        }
+      } while (browser.context_check_pending)
+    })().catch(error => util.emit(this, 'error', {
+      browser: browser.name,
+      error,
+    })).finally(() => {
+      browser.context_checking = null
+    })
   }
 
   async _connect(record) {
@@ -544,21 +632,50 @@ export class cdp extends EventTarget {
       method: 'Target.setDiscoverTargets',
       params: { discover: true },
     })
+    if (Object.values(record.contexts).some(context => context.browserContextId)) {
+      const { browserContextIds } = await socket.req({ method: 'Target.getBrowserContexts' })
+      for (const context of Object.values(record.contexts)) {
+        if (!browserContextIds.includes(context.browserContextId)) context.browserContextId = null
+      }
+    }
   }
 
   async _target(browser, target) {
     const socket = browser.socket
+    const reverse = browser.reverse || browser.cdp_ext
+    if (target.incognito && !reverse && target.context == null && target.create_params?.browserContextId == null) {
+      target.context = 'incognito'
+    }
+    if (target.context != null && target.create_params?.browserContextId != null) {
+      throw new Error('Use target.context or create_params.browserContextId, not both')
+    }
+    const context = target.context == null ? null : await this._context(browser, target.context)
+    if (context) target.context = context.name
     if (!browser.target_info[target.targetId]) {
       target.targetId = (await socket.req({
         method: 'Target.createTarget',
         params: {
           url: 'about:blank',
           background: true,
+          browserContextId: context?.browserContextId,
+          ...(reverse && target.incognito ? { incognito: true } : {}),
           ...target.create_params,
         },
       })).targetId
+      if (context) (browser.target_info[target.targetId] ??= {}).browserContextId = context.browserContextId
     }
     const info = browser.target_info[target.targetId] ??= {}
+    if (context && info.browserContextId !== context.browserContextId) {
+      throw new Error('Existing target belongs to a different browser context')
+    }
+    if (reverse && target.incognito && !info.incognito) {
+      const { targetInfo } = await socket.req({
+        method: 'Target.getTargetInfo',
+        params: { targetId: target.targetId },
+      })
+      Object.assign(info, targetInfo)
+      if (!info.incognito) throw new Error('Existing target is not incognito')
+    }
     if (!info.sessionId) {
       info.sessionId = (await socket.req({
         method: 'Target.attachToTarget',
@@ -634,6 +751,10 @@ export class cdp extends EventTarget {
         ...spec.local_state,
       },
       targets: Object.create(null),
+      contexts: Object.create(null),
+    }
+    if (target?.context != null && (record.reverse || record.cdp_ext)) {
+      throw new Error('Named browser contexts are unavailable through the reverse Chrome extension')
     }
     if (!record.connecting && record.socket?.readyState !== WebSocket.OPEN) {
       record.connecting = this._connect(record).catch(error => {
@@ -643,6 +764,7 @@ export class cdp extends EventTarget {
       }).finally(async () => {
         record.connecting = null
         await this._close_reverse_if_idle()
+        this._close_contexts_if_idle(record)
       })
     }
     await record.connecting
@@ -659,9 +781,14 @@ export class cdp extends EventTarget {
       if (!entry.sessionId) {
         entry.connecting ??= this._target(record, entry).finally(() => {
           entry.connecting = null
+          this._close_contexts_if_idle(record)
         })
         await entry.connecting
       }
+    }
+    if (method === 'Target.disposeBrowserContext' && target == null) {
+      const context = Object.values(record.contexts).find(value => value.browserContextId === native.browserContextId)
+      if (context) return this._dispose_context(record, context, native)
     }
     const result = await record.socket.req({
       method,
@@ -672,6 +799,7 @@ export class cdp extends EventTarget {
     if (method === 'Target.closeTarget' && result.success) {
       this._detach(record, record.target_info[native.targetId]?.sessionId)
       delete record.target_info[native.targetId]
+      await this._close_contexts_if_idle(record)
     }
     return result
   }
@@ -681,6 +809,15 @@ export class cdp extends EventTarget {
       await Promise.all(Object.values(this.browsers).map(async browser => {
         try {
           await browser.connecting
+          browser.closing = true
+          await Promise.allSettled(Object.values(browser.targets).map(target => target.connecting))
+          await browser.context_checking
+          for (const context of Object.values(browser.contexts)) {
+            await context.closing
+            if (context.browserContextId && browser.socket?.readyState === WebSocket.OPEN) {
+              await this._dispose_context(browser, context)
+            }
+          }
           if (browser.proc && !browser.cdp_ext && browser.socket?.readyState === WebSocket.OPEN) {
             await browser.socket.req({ method: 'Browser.close' })
           }

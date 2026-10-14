@@ -363,6 +363,34 @@ chrome.cdp_probe = {
       callback: true,
     }, null), error => /tab/i.test(error.cdp.error.message))
 
+    await assert.rejects(call('Runtime.evaluate', { expression: '1' }, {
+      name: 'named-context',
+      context: 'isolated',
+    }), /Named browser contexts.*reverse/)
+    await assert.rejects(call('Runtime.evaluate', { expression: '1' }, {
+      name: 'private',
+      incognito: true,
+    }), error => /Allow in incognito/.test(error.cdp.error.message))
+    assert.deepEqual(Object.keys(record.contexts), [])
+
+    await call('Target.detachFromTarget', { sessionId: record.targets.page.sessionId }, null)
+    const unobserved = 'http://127.0.0.1:' + page_server.addr.port + '/without-debugger'
+    const web_request = util.on_first(client, 'test_request_completed')
+    const observe = event => {
+      if (event.detail.url === unobserved) util.emit(client, 'test_request_completed', event.detail)
+    }
+    client.addEventListener('chrome.webRequest.onCompleted', observe)
+    const before = await call('chrome.debugger.getTargets', {}, null)
+    assert.equal(before.find(target => target.tabId === tabId).attached, false)
+    await call('chrome.tabs.update', { args: [tabId, { url: unobserved }] }, null)
+    const request = (await web_request).args[0].detail
+    client.removeEventListener('chrome.webRequest.onCompleted', observe)
+    assert.equal(request.target, 'page', 'extension requests retain labels without a debugger session')
+    assert.equal(request.tabId, tabId)
+    assert.equal(request.statusCode, 200)
+    assert.ok(request.responseHeaders.some(header => header.name.toLowerCase() === 'content-type'))
+    assert.equal(record.targets.page.sessionId, null, 'webRequest observation does not reattach the debugger')
+
     await call('Runtime.enable')
     const binding = util.on_first(client, 'Runtime.bindingCalled')
     await call('Runtime.evaluate', { expression: '_send_to_cdp("binding works")' })
@@ -548,6 +576,7 @@ Deno.test('managed reverse launch uses extension identity and keeps a live proce
           expression: 'chrome.developerPrivate.updateExtensionConfiguration(' + JSON.stringify({
             extensionId: browser.extension_id(extension),
             userScriptsAccess: true,
+            incognitoAccess: true,
           }) + ').then(() => true)',
           awaitPromise: true,
         },
@@ -611,6 +640,55 @@ Deno.test('managed reverse launch uses extension identity and keeps a live proce
         }],
       },
     }), error => !!error.cdp)
+    const private_target = {
+      name: 'private',
+      incognito: true,
+    }
+    const private_call = (method, params = {}, target = private_target) => client.call({
+      method,
+      params: {
+        ...params,
+        browser: 'work',
+        target,
+      },
+    })
+    assert.deepEqual((await private_call('Network.getCookies', {
+      urls: ['http://127.0.0.1/'],
+    })).cookies, [])
+    const tab = await client.call({
+      method: 'chrome.tabs.get',
+      params: {
+        browser: 'work',
+        args: [Number(record.targets.private.targetId)],
+      },
+    })
+    assert.equal(tab.incognito, true)
+    await private_call('Network.setCookie', {
+      name: 'private',
+      value: 'yes',
+      url: 'http://127.0.0.1/',
+    })
+    assert.equal((await private_call('Network.getCookies', {
+      urls: ['http://127.0.0.1/'],
+    }, {
+      name: 'private-other',
+      incognito: true,
+    })).cookies.find(cookie => cookie.name === 'private').value, 'yes')
+    assert.equal((await private_call('Network.getCookies', {
+      urls: ['http://127.0.0.1/'],
+    }, 'page')).cookies.some(cookie => cookie.name === 'private'), false)
+    for (const name of ['private', 'private-other']) {
+      await client.call({
+        method: 'Target.closeTarget',
+        params: {
+          browser: 'work',
+          targetId: record.targets[name].targetId,
+        },
+      })
+    }
+    assert.deepEqual((await private_call('Network.getCookies', {
+      urls: ['http://127.0.0.1/'],
+    })).cookies, [], 'closing all incognito tabs clears their storage')
     const closed = util.on_first(client, 'close')
     record.socket.close()
     await closed

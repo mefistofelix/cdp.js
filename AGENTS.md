@@ -11,7 +11,7 @@ Apply the user's current instructions to the task at hand.
 | --- | --- |
 | `cdp.js` | Complete maintained implementation, an ES module importing only Node.js built-ins. |
 | `tests/cdp.test.js` | Node test-runner coverage with real headless Chromium. |
-| `tests/reverse.test.js` | Deno coverage with the real extension and headless Chrome; reverse execution uses no remote-debugging flags. Direct CDP prepares the disposable user-script toggle fixture. |
+| `tests/reverse.test.js` | Deno coverage with the real extension and headless Chrome; reverse execution uses no remote-debugging flags. Direct CDP prepares disposable user-script/incognito grant fixtures. |
 | `cdp_ext/` | Manifest V3 reverse transport: one Chrome worker and its configurable manifest. |
 | `examples/reverse.mjs` | Native Deno server example. |
 | `tests/chat-monitoring.md` | Manual application traffic inspection and tool-session extraction recipe. |
@@ -82,7 +82,8 @@ Chromium ID is recorded in `record.extension_id`; `record.extension_path` is
 canonical. Preserve platform-specific path encoding in `browser.extension_id`.
 An unpacked manifest must have no `key` for this path-derived identity.
 Closing the manager stops owned processes, incoming sockets and the listener,
-preserving external browser processes and tabs.
+and disposes managed named contexts. Preserve external browser processes and
+tabs outside those managed contexts.
 
 WebSocket closure is not evidence of browser exit. Connection errors/timeouts
 must not kill a managed reverse browser or cause another spawn while its process
@@ -100,8 +101,13 @@ to `{}`. The requested `chrome.scripting.executeScript` exception converts a str
 `func` into a fixed native function that evaluates the function expression in the
 destination world and calls it with the original injection arguments. Preserve the
 native world default and Promise/results behavior. Never evaluate source in the
-worker. Do not add other per-API wrappers, automatic tab-ID injection or remote
-event subscriptions. CSP changes require explicit native API calls; do not bypass
+worker. Do not add other per-API wrappers or automatic tab-ID injection. The
+requested `chrome.webRequest.*` notifications forward native request lifecycle
+details without debugger attachment; keep their static native all-URL filter,
+header options and tab-ID routing. No generic remote event registration,
+buffering, filtering or authentication responder is provided. The manifest
+includes `webRequestAuthProvider` for observing `onAuthRequired`.
+CSP changes require explicit native API calls; do not bypass
 or remove CSP automatically. `chrome.userScripts` remains generic pass-through:
 its permission does not enable Chrome's user toggle. Neither extension launch nor
 profile defaults may silently enable Allow User Scripts. The manifest declares
@@ -157,6 +163,7 @@ Node.js helpers. XPath/options are JSON-encoded into the invocation.
 | --- | --- |
 | `client.browsers[name]` | Browser configuration and live connection/process state. |
 | `record.targets[label]` | Logical target configuration, binding, physical IDs and setup status. |
+| `record.contexts[name]` | Named direct browser context options, native ID and creation/disposal promises. |
 | `record.target_info[targetId]` | Native target information and current attached session ID. |
 | `record.session_targets[sessionId]` | Reverse lookup of physical target ID. |
 | `socket.pending[id]` | In-flight response wait. |
@@ -244,6 +251,32 @@ on success, timeout and disconnect.
   and read errors other than missing files. Explicit paths remain selected.
 - `port`/`http_url`/`websocket_url` attach to an existing browser. Raw
   `args['remote-debugging-port']` configures a new process.
+- Browser `proxy` is a launch option: a string generates `proxy-server`, false
+  generates `no-proxy-server`, and unset/null adds neither. Raw arguments override
+  their respective keys independently; do not add proxy parsing, authentication
+  responders or a conflict resolver. `target.context` accepts a name or first-use
+  object with `name`, `proxy` and native `create_params`. Store configurations in
+  public plain `record.contexts`; concurrent targets share one creation promise.
+  False context proxy generates `proxyServer: 'direct://'`; raw context parameters
+  override it. Contexts isolate storage and are unavailable in reverse mode:
+  return an explicit error, without process/profile emulation.
+- Named contexts are owned by the manager. Dispose when no native application
+  targets remain, preserving unselected popups/workers and pending initializations;
+  ignore internal `browser_ui` targets only for this lifetime calculation. Refresh
+  native targets when destruction events trigger cleanup and coalesce concurrent
+  checks. Emit `context_closed` on successful disposal and `error` on asynchronous
+  cleanup failure. Retain the logical definition with a null native ID for reuse.
+  Reconnect preserves surviving contexts; restart invalidates absent IDs. Explicit
+  managed disposal invalidates cached targets immediately. Manager close disposes
+  managed contexts even on externally attached browsers, preserving other tabs
+  and unmanaged contexts. Raw native context IDs remain caller-owned and cannot
+  be combined with `target.context`.
+- `target.incognito` defaults false. Direct mode selects the shared named context
+  `'incognito'` unless an explicit context/raw native ID is supplied. Reverse mode
+  creates/reuses a native incognito window; its tabs share Chrome's private session.
+  Require the user's Allow in incognito grant and never enable it automatically.
+  The manifest uses spanning mode. Existing regular tabs cannot be converted.
+  Generic `chrome.proxy` settings remain profile/incognito scoped, not per tab.
 - Profile preferences use dotted keys and preserve unrelated JSON. Only a missing
   file becomes an empty object; parsing/other filesystem errors propagate.
   The `cdp` manager applies preferences before spawning; `browser.launch` does
@@ -270,7 +303,7 @@ on success, timeout and disconnect.
   The browser option `windowsHide` defaults to
   whether the final arguments include `--headless`, including raw overrides.
   An explicit value takes precedence and is passed to `spawn`.
-- Browser/target/session mappings remain in memory. Profile preference files do
+- Browser/context/target/session mappings remain in memory. Profile preference files do
   not authorize adding persistence for those mappings.
 
 ## Scope and simplification
@@ -304,6 +337,7 @@ the task and preserve unrelated work. After a coherent implementation change:
 
 ```sh
 node --check cdp.js
+node --check cdp_ext/cdp_ext.js
 node --test tests/cdp.test.js
 deno test -A tests/reverse.test.js
 git diff --check
@@ -313,7 +347,9 @@ Tests use a real browser and disposable `build/tests/` profiles. Coverage includ
 native results/errors, custom handlers, concurrency, XPath, event labels, bindings,
 detach/close/recreation, reconnect including immediate socket reuse, independent
 browsers, endpoint forms, timeout/listener cleanup, CLI overrides, preference
-merging and actual Chrome translation/sign-in settings. If the browser is
+merging, actual proxy routing, named-context lifetime/concurrency, incognito,
+reverse network observation without debugger and actual Chrome translation/sign-in
+settings. If the browser is
 unavailable, report that rather than claiming unrun checks passed.
 
 Add tests for meaningful behavioral risks, not trivial wrappers or source-shape
