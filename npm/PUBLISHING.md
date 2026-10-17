@@ -37,6 +37,7 @@ node --check cdp.js
 node --check cdp_ext/cdp_ext.js
 node --test tests/cdp.test.js
 deno test -A tests/reverse.test.js
+bun test tests/cdp.test.js tests/reverse.test.js --timeout 60000
 git diff --check
 ```
 
@@ -66,7 +67,7 @@ The manifest's `files` allowlist includes the sources; npm includes the manifest
 and README automatically. Tests, profiles, tools, and local references stay out.
 Use `npm pack ./npm` to create a local archive if needed.
 For releases affecting reverse mode, install that archive into a disposable
-directory and exercise a managed `cdp_ext: true` launch under Deno from the
+directory and exercise a managed `cdp_ext: true` launch under Deno and Bun from the
 installed entry point. The manager must find both packaged extension files and
 write its profile-specific copy automatically. Check the copied worker bytes and
 the copied manifest's server URL; it must not depend on repository source paths.

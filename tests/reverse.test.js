@@ -3,9 +3,12 @@ import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import { spawn } from 'node:child_process'
 import { once, getEventListeners } from 'node:events'
+import { createServer } from 'node:http'
 import { browser, cdp, util } from '../cdp.js'
 
-Deno.test('reverse extension controls real Chrome without remote-debugging arguments', async () => {
+const test = globalThis.Deno ? Deno.test : (await import('bun:test')).test
+
+test('reverse extension controls real Chrome without remote-debugging arguments', async () => {
   const build = path.resolve('build/tests')
   await fs.mkdir(build, { recursive: true })
   const directory = await fs.mkdtemp(path.join(build, 'reverse-'))
@@ -86,14 +89,14 @@ chrome.cdp_probe = {
   const exited = once(proc, 'exit')
   let other_proc
   let other_exited
-  const page_server = Deno.serve({
-    hostname: '127.0.0.1',
-    port: 0,
-  }, request => {
+  const page_server = createServer((request, response) => {
     const headers = { 'content-type': 'text/html' }
-    if (new URL(request.url).pathname === '/csp') headers['content-security-policy'] = "script-src 'none'"
-    return new Response('<h1>Reverse test</h1><button onclick="this.textContent=\'clicked\'">Click</button>', { headers })
+    if (request.url === '/csp') headers['content-security-policy'] = "script-src 'none'"
+    response.writeHead(200, headers)
+    response.end('<h1>Reverse test</h1><button onclick="this.textContent=\'clicked\'">Click</button>')
   })
+  page_server.listen(0, '127.0.0.1')
+  await once(page_server, 'listening')
   const call = (method, params = {}, target = 'page') => client.call({
     method,
     params: {
@@ -163,7 +166,7 @@ chrome.cdp_probe = {
 
     const network = util.on_first(client, 'Network.requestWillBeSent')
     const loaded = util.on_first(client, 'Page.loadEventFired')
-    await call('Page.navigate', { url: 'http://127.0.0.1:' + page_server.addr.port })
+    await call('Page.navigate', { url: 'http://127.0.0.1:' + page_server.address().port })
     assert.equal((await network).args[0].detail.target, 'page')
     await loaded
     const found = await call('_.find', { xpath: '//h1' })
@@ -231,7 +234,7 @@ chrome.cdp_probe = {
       }],
     }, null))[0].result, 42)
     const cspId = (await call('Target.createTarget', {
-      url: 'http://127.0.0.1:' + page_server.addr.port + '/csp',
+      url: 'http://127.0.0.1:' + page_server.address().port + '/csp',
     }, null)).targetId
     for (const world of ['ISOLATED', 'MAIN']) {
       const result = await call('chrome.cdp_probe.evaluate_source', {
@@ -348,7 +351,7 @@ chrome.cdp_probe = {
     assert.equal(await call('chrome.extension.isAllowedIncognitoAccess', {}, null), false)
     assert.equal(await call('chrome.cookies.get', {
       args: [{
-        url: 'http://127.0.0.1:' + page_server.addr.port,
+        url: 'http://127.0.0.1:' + page_server.address().port,
         name: 'missing-cookie',
       }],
     }, null), null)
@@ -374,7 +377,7 @@ chrome.cdp_probe = {
     assert.deepEqual(Object.keys(record.contexts), [])
 
     await call('Target.detachFromTarget', { sessionId: record.targets.page.sessionId }, null)
-    const unobserved = 'http://127.0.0.1:' + page_server.addr.port + '/without-debugger'
+    const unobserved = 'http://127.0.0.1:' + page_server.address().port + '/without-debugger'
     const web_request = util.on_first(client, 'test_request_completed')
     const observe = event => {
       if (event.detail.url === unobserved) util.emit(client, 'test_request_completed', event.detail)
@@ -503,7 +506,8 @@ chrome.cdp_probe = {
     assert.equal(other_proc.exitCode, null)
   } finally {
     await client.close()
-    await page_server.shutdown()
+    page_server.closeAllConnections()
+    await new Promise(resolve => page_server.close(resolve))
     proc.kill()
     await exited
     other_proc?.kill()
@@ -511,17 +515,17 @@ chrome.cdp_probe = {
   }
 })
 
-Deno.test('managed reverse launch uses extension identity and keeps a live process through disconnects', async () => {
+test('managed reverse launch uses extension identity and keeps a live process through disconnects', async () => {
   const directory = await fs.mkdtemp(path.resolve('build/tests/managed-reverse-'))
-  const page_server = Deno.serve({
-    hostname: '127.0.0.1',
-    port: 0,
-  }, () => new Response('<h1>User script test</h1>', {
-    headers: {
+  const page_server = createServer((request, response) => {
+    response.writeHead(200, {
       'content-type': 'text/html',
       'content-security-policy': "script-src 'none'",
-    },
-  }))
+    })
+    response.end('<h1>User script test</h1>')
+  })
+  page_server.listen(0, '127.0.0.1')
+  await once(page_server, 'listening')
   const client = new cdp({
     base_path: directory,
     headless: true,
@@ -611,7 +615,7 @@ Deno.test('managed reverse launch uses extension identity and keeps a live proce
       params: {
         browser: 'work',
         target: 'page',
-        url: 'http://127.0.0.1:' + page_server.addr.port,
+        url: 'http://127.0.0.1:' + page_server.address().port,
       },
     })
     await loaded
@@ -721,11 +725,12 @@ Deno.test('managed reverse launch uses extension identity and keeps a live proce
     await client.close()
     await exited
     await direct_exited
-    await page_server.shutdown()
+    page_server.closeAllConnections()
+    await new Promise(resolve => page_server.close(resolve))
   }
 })
 
-Deno.test('an external reverse wait starts lazily and releases the listener after timeout', async () => {
+test('an external reverse wait starts lazily and releases the listener after timeout', async () => {
   const client = new cdp({
     reverse: true,
     reverse_server: { port: 0 },
@@ -737,11 +742,10 @@ Deno.test('an external reverse wait starts lazily and releases the listener afte
     assert.equal(client.server, null)
     const port = client.reverse_server.port
     assert.ok(port > 0, 'first reverse use allocated a listening port')
-    const probe = Deno.listen({
-      hostname: '127.0.0.1',
-      port,
-    })
-    probe.close()
+    const probe = createServer()
+    probe.listen(port, '127.0.0.1')
+    await once(probe, 'listening')
+    await new Promise(resolve => probe.close(resolve))
     await assert.rejects(client.call({ method: 'Browser.getVersion' }), /abort/i)
     assert.equal(client.reverse_server.port, port, 'restart keeps the endpoint used by extensions')
     assert.equal(client.server, null)

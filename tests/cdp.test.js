@@ -398,7 +398,7 @@ test('timeouts, disconnects and launch failures reject without hanging or replay
     name: 'missing',
     executable_path: path.join(build, 'missing-browser'),
     user_data_dir: path.join(build, 'invalid'),
-  }), /ENOENT/)
+  }), { code: 'ENOENT' })
 
 })
 
@@ -619,7 +619,7 @@ test('manager without a user-data directory skips preference writes', async t =>
       'devtools.remote_debugging.user-enabled': true,
     },
   })
-  await assert.rejects(call(client, 'Browser.getVersion', {}, null), /ENOENT/)
+  await assert.rejects(call(client, 'Browser.getVersion', {}, null), { code: 'ENOENT' })
 })
 
 test('extension options cascade through raw arguments without mutating inputs', () => {

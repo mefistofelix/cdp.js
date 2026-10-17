@@ -46,7 +46,7 @@ export class util {
 
 export class jsrpc extends WebSocket {
   constructor(url, options = {}) {
-    const socket = url instanceof WebSocket ? url : super(url)
+    const socket = typeof url === 'string' || url instanceof URL ? super(url) : url
     setMaxListeners(0, socket)
     socket.id = 0
     socket.pending = {}
@@ -355,18 +355,9 @@ export class cdp extends EventTarget {
     hostname = '127.0.0.1',
     port = 9223,
   } = this.reverse_server) {
-    if (!globalThis.Deno) throw new Error('The reverse WebSocket server requires Deno')
+    if (!globalThis.Deno && !globalThis.Bun) throw new Error('The reverse WebSocket server requires Deno or Bun')
     if (this.server) throw new Error('Reverse server is already listening')
-    this.server = Deno.serve({
-      hostname,
-      port,
-    }, request => {
-      const origin = request.headers.get('origin')
-      if (request.headers.get('upgrade') !== 'websocket' ||
-          !origin?.startsWith('chrome-extension://')) {
-        return new Response(null, { status: 403 })
-      }
-      const { socket, response } = Deno.upgradeWebSocket(request)
+    const accept = (socket, origin) => {
       socket.addEventListener('message', event => {
         const id = JSON.parse(event.data).browser
         if (id !== origin.slice('chrome-extension://'.length) ||
@@ -380,8 +371,61 @@ export class cdp extends EventTarget {
         })
         util.emit(this, 'reverse_' + encodeURIComponent(id), socket)
       }, { once: true })
+    }
+    const fetch = (request, server) => {
+      const origin = request.headers.get('origin')
+      if (request.headers.get('upgrade') !== 'websocket' ||
+          !origin?.startsWith('chrome-extension://')) {
+        return new Response(null, { status: 403 })
+      }
+      if (globalThis.Bun) {
+        if (server.upgrade(request, {
+          data: {
+            origin,
+            socket: new EventTarget(),
+          },
+        })) return
+        return new Response(null, { status: 400 })
+      }
+      const { socket, response } = Deno.upgradeWebSocket(request)
+      accept(socket, origin)
       return response
-    })
+    }
+    if (globalThis.Bun) {
+      const server = this.server = Bun.serve({
+        hostname,
+        port,
+        fetch,
+        websocket: {
+          open(socket) {
+            const events = socket.data.socket
+            events.send = socket.send.bind(socket)
+            events.close = socket.close.bind(socket)
+            Object.defineProperty(events, 'readyState', { get: () => socket.readyState })
+            accept(events, socket.data.origin)
+          },
+          message(socket, data) {
+            socket.data.socket.dispatchEvent(new MessageEvent('message', { data }))
+          },
+          close(socket, code, reason) {
+            socket.data.socket.dispatchEvent(Object.assign(new Event('close'), {
+              code,
+              reason,
+            }))
+          },
+        },
+      })
+      server.addr = {
+        hostname,
+        port: server.port,
+      }
+      const finished = Promise.withResolvers()
+      server.finished = finished.promise
+      server.shutdown = () => server.stop().then(finished.resolve)
+    } else this.server = Deno.serve({
+      hostname,
+      port,
+    }, fetch)
     this.reverse_server = {
       hostname,
       port: this.server.addr.port,

@@ -1,13 +1,16 @@
 # cdp.js
 
-A low-level Chromium DevTools Protocol library for Node.js, with an optional
-native Deno server for Chrome extension reverse connections. One ES module,
+A low-level Chromium DevTools Protocol library for Node.js, Deno and Bun, with an
+optional native Deno/Bun server for Chrome extension reverse connections. One ES module,
 standard-library imports, no runtime dependencies or root `package.json`.
 
 Use Node.js 22.19+ and an installed Chrome, Chromium or Edge. Import `cdp.js`
 directly from an ES module, for example `example.mjs`, and run `node example.mjs`.
 Browser discovery covers common Windows, macOS and Linux installation paths;
 use `executable_path` or the `CDP_BROWSER` environment variable for other paths.
+The same module also runs with `bun example.mjs` or `deno run -A example.mjs`.
+Direct and reverse modes are tested with Bun 1.4.3; no Bun-specific package,
+configuration file or installation step is required by the library.
 
 For a published npm release:
 
@@ -24,7 +27,8 @@ below remain supported. Publication metadata is isolated in `npm/`.
 The package includes both `cdp_ext/` files. With `cdp_ext: true`, the manager
 writes a configured extension copy into the browser's profile directory and loads
 it automatically; no manual extraction or build is needed. Reverse mode still
-requires Deno. In Deno, import from `npm:@mefistofelix/cdp.js`.
+requires Deno or Bun. In Deno, import from `npm:@mefistofelix/cdp.js`.
+In Bun, use `bun add @mefistofelix/cdp.js` and the ordinary package import above.
 
 ## Features and scope
 
@@ -34,7 +38,7 @@ requires Deno. In Deno, import from `npm:@mefistofelix/cdp.js`.
   and automatic cleanup after their last target closes.
 - Incognito targets in direct and reverse modes.
 - Attachment through WebSocket, HTTP discovery or a debugging port.
-- Optional Chrome extension reverse connections through one native Deno server,
+- Optional Chrome extension reverse connections through one native Deno/Bun server,
   without browser remote-debugging arguments.
 - Generic `chrome.x.y` extension API calls on that connection, including scripting,
   tabs/windows, cookies, storage, downloads and browser settings.
@@ -116,8 +120,8 @@ import api, { util, jsrpc, browser, cdp } from './cdp.js'
 | `client.call({ method, params = {} })` | Resolve routing and return a promise for the native CDP result, or a custom handler's result. |
 | `client.evaluate_xpath(params, fn, options)` | Execute a serialized function with a normalized XPath in a target; return the native `Runtime.evaluate` result. |
 | `client.close()` | Close owned processes, disconnect attached/reverse browsers, stop the reverse server and clear browser/socket mappings. Profiles and external browsers remain. |
-| `new jsrpc(urlOrSocket, options = {})` | Open a raw WebSocket JSON-RPC connection or equip an accepted native WebSocket with the same RPC methods. |
-| `client.listen_reverse(options = {})` | Start the native Deno WebSocket server; returns its `HttpServer`. |
+| `new jsrpc(urlOrSocket, options = {})` | Open a raw WebSocket JSON-RPC connection or equip an accepted socket with the same RPC methods. |
+| `client.listen_reverse(options = {})` | Start the native Deno or Bun WebSocket server; returns that server with common lifecycle fields documented below. |
 | `socket.req(request, timeout_ms)` | Assign a request ID and await its native result. |
 | `socket.notify(request)` | Serialize and send a raw message; no ID allocation or response wait. |
 | `socket.close()` | Native WebSocket close; does not terminate the browser. |
@@ -237,8 +241,8 @@ local configuration.
 | `request_timeout_ms` | number, `30000` | Default timeout for each protocol request on this browser's socket. |
 | `waitForDebuggerOnStart` | boolean, `false` | Ask Chromium to pause newly auto-attached targets. Applied to `Target.setAutoAttach` when connecting; not a CLI argument or target option. |
 | `websocket_url` | string, unset | Attach directly to a browser WebSocket endpoint. |
-| `cdp_ext` | boolean, `false` | Launch with the reverse extension under Deno. Start one shared server automatically if needed, prepare a profile-specific extension copy and wait for its connection. |
-| `reverse` | boolean, `false` | Attach to an externally launched extension instead of launching or discovering a browser. Starts the shared listener on first use under Deno. |
+| `cdp_ext` | boolean, `false` | Launch with the reverse extension under Deno or Bun. Start one shared server automatically if needed, prepare a profile-specific extension copy and wait for its connection. |
+| `reverse` | boolean, `false` | Attach to an externally launched extension instead of launching or discovering a browser. Starts the shared listener on first use under Deno or Bun. |
 | `extension_id` | string, browser name for external reverse attachment | Incoming extension ID to associate with this logical browser. Set automatically for managed `cdp_ext` launches. |
 | `http_url` | string, unset | Discover the endpoint from an HTTP(S) base URL or exact `/json/version` URL. |
 | `port` | number, unset | Discover an existing browser at `http://<host>:<port>/json/version`. |
@@ -343,7 +347,7 @@ Native proxy rules can use semicolon-separated strings; the generic CLI converte
 still comma-joins every array. Bypass lists accept both separators. Chrome gives
 `no-proxy-server` precedence, so overriding `proxy-server` alone does not cancel
 that flag; override `args['no-proxy-server']: false` too if needed.
-Browser proxy options affect Chrome traffic, not Node/Deno's endpoint discovery
+Browser proxy options affect Chrome traffic, not the runtime's endpoint discovery
 or CDP transport. Chrome normally bypasses loopback addresses. To proxy them,
 use `args['proxy-bypass-list']: '<-loopback>'`; in reverse mode keep the extension's
 local WebSocket listener reachable. The library inserts no extra bypass rule.
@@ -491,12 +495,13 @@ browser instances on the same port; each extension announces its native ID
 in its first message. No remote-debugging argument is needed.
 
 Run the server under Deno using its native
-[WebSocket upgrade](https://docs.deno.com/api/deno/websockets/).
+[WebSocket upgrade](https://docs.deno.com/api/deno/websockets/) or under Bun using
+[Bun.serve](https://bun.sh/docs/runtime/http/websockets).
 Node's direct CDP mode remains supported; `listen_reverse()` under Node rejects
-with an explicit Deno requirement. There is no WebSocket framing implementation,
+with an explicit Deno/Bun requirement. There is no WebSocket framing implementation,
 third-party server dependency or additional build step.
 
-Run `deno run -A examples/reverse.mjs` to launch Chrome with the extension, create
+Run `deno run -A examples/reverse.mjs` or `bun examples/reverse.mjs` to launch Chrome with the extension, create
 a target and evaluate `21 * 2`. Ctrl+C closes the owned browser and server.
 The same mode is available per browser:
 
@@ -589,14 +594,23 @@ retry. Direct browsers do not keep this listener alive.
 `client.reverse_server` is the public shared configuration object. After startup
 it contains the effective listening port, including when `port: 0` originally
 requested an available port. Restarts reuse that port so existing extensions can
-still reconnect. `client.server` contains the current native Deno `HttpServer`,
+still reconnect. `client.server` contains the current native Deno `HttpServer` or Bun `Server`,
 or is unset/null while stopped. A call arriving during shutdown waits for it to
 finish before starting a replacement server.
 
 `listen_reverse(options = client.reverse_server)` remains available to start the
-listener explicitly ahead of a browser call. It returns the native `HttpServer`;
+listener explicitly ahead of a browser call. It returns the native runtime server;
 calling it while a server is running rejects. Explicit options replace the stored
 settings, with omitted fields taking the hostname/port defaults above.
+
+Both runtimes expose `server.addr.hostname`, `server.addr.port`,
+`server.shutdown()` and `server.finished`. On Bun, the library adds these fields:
+`shutdown()` calls native `stop()` and resolves `finished` after shutdown.
+Use `client.close()` to also close owned browsers and incoming sockets.
+Bun's callback-based server sockets receive a small EventTarget adapter with
+native send/close and live ready state. The same `jsrpc` handles both runtimes;
+registration, request IDs, pending waits, events and session routing are shared.
+Native Bun WebSocket limits still apply.
 
 Reverse calls reuse the normal target setup, custom handlers, mappings, routed
 events, request correlation, timeout and error behavior. `reverse: true` alone
@@ -1530,9 +1544,9 @@ dictionary containers have a null prototype.
 | `client.reverse_server` | Shared listener configuration; the effective hostname/port are stored after startup. |
 | `client.custom_methods[name]` | Handler function. |
 | `client.browsers[name]` | Browser configuration fields plus live state. |
-| `client.reverse_sockets[extension_id]` | Announced incoming native WebSocket, available even before the first call. |
+| `client.reverse_sockets[extension_id]` | Announced incoming socket, available even before the first call; native on Deno, an EventTarget adapter on Bun. |
 | `record.extension_id`, `record.extension_path` | Expected extension identity and the managed copy's canonical directory. |
-| `client.server` | Current native Deno reverse `HttpServer`, or unset/null when not listening. |
+| `client.server` | Current native Deno/Bun reverse server with shared lifecycle fields, or unset/null when not listening. |
 | `client.server_closing` | Shutdown promise while the reverse listener is stopping, otherwise unset/null. |
 | `record.socket` | Current `jsrpc` connection once created. |
 | `record.proc` | Owned child process; absent for external attachment. |
@@ -1599,11 +1613,13 @@ subject to the debugging-port restrictions described above.
 Readiness timeout or launch failure rejects and attempts to
 terminate the spawned process.
 
-`jsrpc` takes a WebSocket URL or an accepted native WebSocket and an options
+`jsrpc` takes a WebSocket URL or an accepted EventTarget socket and an options
 object whose recognized option is
 `request_timeout_ms` (default `30000`). Wait for the socket to open before `req`.
-For an accepted socket, it returns that same WebSocket with RPC fields/methods;
-it remains a native WebSocket, but need not be an instance of the `jsrpc` subclass.
+For an accepted socket, it returns that same object with RPC fields/methods.
+The object supplies `send`, `close`, live `readyState` and normal message/close/error
+events. Deno sockets remain native WebSockets; Bun uses the adapter described
+above. Accepted sockets need not be instances of the `jsrpc` subclass.
 The reverse server consumes the initial browser announcement before equipping
 the socket with RPC behavior. Empty-text heartbeats are ignored.
 The request is a raw envelope: `method`, optional `params`, and optional top-level
@@ -1662,12 +1678,13 @@ node --check cdp.js
 node --check cdp_ext/cdp_ext.js
 node --test tests/cdp.test.js
 deno test -A tests/reverse.test.js
+bun test tests/cdp.test.js tests/reverse.test.js --timeout 60000
 ```
 
 Integration tests launch local headless Chromium with disposable profiles under
 `build/tests/`. Set `CDP_BROWSER` if discovery does not match the machine. Direct
 library use needs no build or package installation; npm packaging is optional.
-The Deno test loads the real extension into two headless Chrome instances on one
+The shared Deno/Bun reverse suite loads the real extension into two headless Chrome instances on one
 server port without remote-debugging arguments. It checks native/custom calls,
 Network events, webRequest notifications without debugger attachment, bindings,
 child sessions, reconnect, detach/recreate, incognito and isolation.

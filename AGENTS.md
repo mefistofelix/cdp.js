@@ -10,10 +10,10 @@ Apply the user's current instructions to the task at hand.
 | Path | Role |
 | --- | --- |
 | `cdp.js` | Complete maintained implementation, an ES module importing only Node.js built-ins. |
-| `tests/cdp.test.js` | Node test-runner coverage with real headless Chromium. |
-| `tests/reverse.test.js` | Deno coverage with the real extension and headless Chrome; reverse execution uses no remote-debugging flags. Direct CDP prepares disposable user-script/incognito grant fixtures. |
+| `tests/cdp.test.js` | Node/Bun test-runner coverage with real headless Chromium. |
+| `tests/reverse.test.js` | Shared Deno/Bun coverage with the real extension and headless Chrome; reverse execution uses no remote-debugging flags. Direct CDP prepares disposable user-script/incognito grant fixtures. |
 | `cdp_ext/` | Manifest V3 reverse transport: one Chrome worker and its configurable manifest. |
-| `examples/reverse.mjs` | Native Deno server example. |
+| `examples/reverse.mjs` | Native Deno/Bun server example. |
 | `tests/chat-monitoring.md` | Manual application traffic inspection and tool-session extraction recipe. |
 | `npm/package.json` | Publication metadata and version; no root package manifest. |
 | `npm/PUBLISHING.md` | Initial npm login/publication and trusted publisher setup. |
@@ -30,8 +30,9 @@ Use Node.js 22.19+ and an installed Chromium-family browser. Direct library use
 needs no package install or compilation. There is no root package manifest or
 third-party runtime dependency; `npm/package.json` exists only for publication.
 Use `.mjs` for standalone examples and `CDP_BROWSER` to select a test executable.
-Reverse listening uses native Deno APIs, with no extra dependency. Node continues
-to support direct CDP. Download portable development runtimes into ignored `tools/`
+Reverse listening uses native Deno or Bun APIs, with no extra dependency. Bun
+also supports direct CDP; Node continues to support direct CDP. Bun 1.4.3 is tested.
+Download portable development runtimes into ignored `tools/`
 if needed; the extension itself is authoritative source under `cdp_ext/`.
 
 Keep the implementation in the root file. Generic examples in DEV_PREF mentioning
@@ -55,10 +56,16 @@ options/files/processes, not CDP connections or target/session routing.
 `evaluate_xpath` belongs to `cdp` because it issues `Runtime.evaluate`; only the
 string rewrite belongs to `util`.
 
-`new jsrpc(socket)` decorates and returns an accepted native WebSocket, reusing
-the same request methods and event correlation. Do not duplicate this transport
-for reverse connections. Empty text is a heartbeat, not a JSON message.
-`cdp.listen_reverse` owns one native Deno server for all incoming extensions.
+`new jsrpc(socket)` decorates and returns an accepted EventTarget socket, reusing
+the same request methods and event correlation. Deno supplies a native WebSocket;
+Bun's callback-based ServerWebSocket uses a small EventTarget adapter with bound
+native send/close and a live readyState getter. Keep adaptation at this boundary;
+do not duplicate RPC methods, session routing or registration for Bun. Empty text
+is a heartbeat, not a JSON message.
+`cdp.listen_reverse` owns one native Deno/Bun server for all incoming extensions.
+On Bun add `addr`, `shutdown()` and `finished` to the native server for the shared
+lifecycle contract; shutdown delegates to native stop. Keep Deno's native return
+value and Node's explicit unsupported-server error.
 Start it lazily at the first reverse or extension-mode browser call; construction
 and direct CDP calls do not listen. Constructor-only `reverse_server` settings
 belong to the manager, not browser defaults. Keep the effective port for restarts,
@@ -340,6 +347,7 @@ node --check cdp.js
 node --check cdp_ext/cdp_ext.js
 node --test tests/cdp.test.js
 deno test -A tests/reverse.test.js
+bun test tests/cdp.test.js tests/reverse.test.js --timeout 60000
 git diff --check
 ```
 
@@ -377,6 +385,8 @@ extension files required for managed reverse launches; source bytes and exports
 must match direct-file use. Follow `npm/PUBLISHING.md` for authentication and
 release steps. Packaging must not change repository visibility, add a license
 without a user decision, or include profiles, tests, private data, or tools.
+Verify installed-package launches under Bun when changing its transport. Keep
+test HTTP fixtures on `node:http` so both reverse runtimes run the same cases.
 
 Follow [DEV_PREF.md](DEV_PREF.md)'s commit-and-push workflow for meaningful completed
 steps when a remote exists. Review the diff and stage only intended files. Report
