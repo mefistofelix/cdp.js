@@ -684,9 +684,58 @@ export class cdp extends EventTarget {
     }
   }
 
+  async _group(browser, target) {
+    const socket = browser.socket
+    const group = browser.groups[target.group]
+    while (group.connecting) await group.connecting
+    return group.connecting = (async () => {
+      const tab = await socket.req({
+        method: 'chrome.tabs.get',
+        params: { args: [Number(target.targetId)] },
+      })
+      const groups = await socket.req({
+        method: 'chrome.tabGroups.query',
+        params: { args: [{ windowId: tab.windowId }] },
+      })
+      const groupId = group.window_groups[tab.windowId]
+      const existing = groups.some(value => value.id === groupId)
+      const id = await socket.req({
+        method: 'chrome.tabs.group',
+        params: {
+          args: [{
+            tabIds: tab.id,
+            groupId: existing ? groupId : undefined,
+            createProperties: existing ? undefined : { windowId: tab.windowId },
+          }],
+        },
+      })
+      group.window_groups[tab.windowId] = id
+      await socket.req({
+        method: 'chrome.tabGroups.update',
+        params: {
+          args: [id, {
+            title: group.name,
+            color: group.color,
+          }],
+        },
+      })
+      return id
+    })().finally(() => {
+      group.connecting = null
+    })
+  }
+
   async _target(browser, target) {
     const socket = browser.socket
     const reverse = browser.reverse || browser.cdp_ext
+    if (target.group != null && target.group !== false) {
+      const spec = typeof target.group === 'string' ? { name: target.group } : target.group
+      browser.groups[spec.name] ??= {
+        ...spec,
+        window_groups: Object.create(null),
+      }
+      target.group = spec.name
+    }
     if (target.incognito && !reverse && target.context == null && target.create_params?.browserContextId == null) {
       target.context = 'incognito'
     }
@@ -720,6 +769,7 @@ export class cdp extends EventTarget {
       Object.assign(info, targetInfo)
       if (!info.incognito) throw new Error('Existing target is not incognito')
     }
+    if (target.group != null && target.group !== false) info.groupId = await this._group(browser, target)
     if (!info.sessionId) {
       info.sessionId = (await socket.req({
         method: 'Target.attachToTarget',
@@ -796,9 +846,13 @@ export class cdp extends EventTarget {
       },
       targets: Object.create(null),
       contexts: Object.create(null),
+      groups: Object.create(null),
     }
     if (target?.context != null && (record.reverse || record.cdp_ext)) {
       throw new Error('Named browser contexts are unavailable through the reverse Chrome extension')
+    }
+    if (target?.group != null && target.group !== false && !record.reverse && !record.cdp_ext) {
+      throw new Error('Tab groups require the reverse Chrome extension (cdp_ext or reverse)')
     }
     if (!record.connecting && record.socket?.readyState !== WebSocket.OPEN) {
       record.connecting = this._connect(record).catch(error => {

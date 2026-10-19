@@ -38,6 +38,23 @@ test('public exports contain jsrpc, cdp and static utilities', async () => {
   assert.deepEqual(Object.keys(await import('../cdp.js')).sort(), ['browser', 'cdp', 'default', 'jsrpc', 'util'])
 })
 
+test('tab groups reject direct mode before launching a browser', async t => {
+  const client = new cdp()
+  t.after(() => client.close())
+  const group = Object.freeze({
+    name: 'work',
+    color: 'blue',
+  })
+  const target = Object.freeze({
+    name: 'page',
+    group,
+  })
+  await assert.rejects(call(client, 'Runtime.evaluate', { expression: '42' }, target), /Tab groups require.*extension/)
+  assert.equal(target.group, group)
+  assert.equal(client.browsers.main.proc, undefined)
+  assert.equal(client.browsers.main.socket, undefined)
+})
+
 test('custom methods are ordinary mutable handlers and return their own results', async t => {
   const client = new cdp()
   const other = new cdp()

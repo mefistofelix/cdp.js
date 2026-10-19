@@ -19,6 +19,7 @@ function target_info(tab) {
     url: tab.url ?? tab.pendingUrl ?? '',
     attached: !!attached[tab.id],
     incognito: tab.incognito,
+    groupId: tab.groupId,
   }
 }
 

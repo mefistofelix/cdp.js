@@ -456,6 +456,64 @@ chrome.cdp_probe = {
     assert.equal(record.targets.page.sessionId, null)
     assert.equal((await call('Runtime.evaluate', { expression: '42' })).result.value, 42)
     assert.notEqual(record.targets.page.targetId, targetId)
+    const grouped = [Object.freeze({
+      name: 'group-first',
+      group: Object.freeze({
+        name: '__proto__',
+        color: 'blue',
+      }),
+      initialize: false,
+    }), {
+      name: 'group-second',
+      group: '__proto__',
+      targetId: record.targets.page.targetId,
+      initialize: false,
+    }]
+    await Promise.all(grouped.map(target => call('Runtime.evaluate', { expression: '42' }, target)))
+    const group = record.groups.__proto__
+    assert.equal(Object.getPrototypeOf(record.groups), null)
+    const group_tabs = await Promise.all(grouped.map(target => call('chrome.tabs.get', {
+      args: [Number(record.targets[target.name].targetId)],
+    }, null)))
+    const groupId = group_tabs[0].groupId
+    assert.notEqual(groupId, -1)
+    assert.equal(group_tabs[1].groupId, groupId, 'concurrent first use creates one group')
+    assert.equal(group_tabs[1].id, Number(record.targets.page.targetId), 'existing tabs can join a group')
+    assert.equal(group.window_groups[group_tabs[0].windowId], groupId)
+    assert.equal(record.target_info[record.targets['group-first'].targetId].groupId, groupId)
+    const group_info = await call('chrome.tabGroups.get', { args: [groupId] }, null)
+    assert.equal(group_info.title, '__proto__')
+    assert.equal(group_info.color, 'blue')
+    assert.equal(record.targets['group-first'].group, '__proto__')
+    assert.equal(grouped[0].group.color, 'blue', 'target/group input objects remain unchanged')
+    const group_disconnected = util.on_first(client, 'close')
+    record.socket.close()
+    await group_disconnected
+    await call('Runtime.evaluate', { expression: '42' }, 'group-first')
+    assert.equal((await call('chrome.tabs.get', {
+      args: [group_tabs[0].id],
+    }, null)).groupId, groupId, 'reconnect retains a surviving group')
+    for (const tab of group_tabs) await call('Target.closeTarget', { targetId: String(tab.id) }, null)
+    await call('Runtime.evaluate', { expression: '42' }, 'group-first')
+    const recreated_group = await call('chrome.tabs.get', {
+      args: [Number(record.targets['group-first'].targetId)],
+    }, null)
+    assert.notEqual(recreated_group.groupId, groupId, 'closing the last tab permits fresh group creation')
+    assert.equal((await call('chrome.tabGroups.get', { args: [recreated_group.groupId] }, null)).color, 'blue')
+    await assert.rejects(call('Runtime.evaluate', { expression: '42' }, {
+      name: 'invalid-group',
+      group: {
+        name: 'invalid',
+        color: 'invalid-color',
+      },
+    }), error => /chrome.tabGroups.update/.test(error.cause.req.method))
+    record.groups.invalid.color = 'red'
+    await call('Runtime.evaluate', { expression: '42' }, 'invalid-group')
+    assert.equal(record.groups.invalid.connecting, null, 'a failed group operation can be retried')
+    const invalid_tab = await call('chrome.tabs.get', {
+      args: [Number(record.targets['invalid-group'].targetId)],
+    }, null)
+    assert.equal((await call('chrome.tabGroups.get', { args: [invalid_tab.groupId] }, null)).color, 'red')
     const other_extension = path.join(directory, 'other-extension')
     await fs.mkdir(other_extension)
     await fs.writeFile(path.join(other_extension, 'manifest.json'), JSON.stringify(manifest))
@@ -647,6 +705,10 @@ test('managed reverse launch uses extension identity and keeps a live process th
     const private_target = {
       name: 'private',
       incognito: true,
+      group: {
+        name: 'private-work',
+        color: 'green',
+      },
     }
     const private_call = (method, params = {}, target = private_target) => client.call({
       method,
@@ -667,6 +729,22 @@ test('managed reverse launch uses extension identity and keeps a live process th
       },
     })
     assert.equal(tab.incognito, true)
+    const private_group = tab.groupId
+    assert.notEqual(private_group, -1)
+    await private_call('Runtime.evaluate', { expression: '42' }, {
+      name: 'regular-group',
+      group: 'private-work',
+    })
+    const regular_tab = await client.call({
+      method: 'chrome.tabs.get',
+      params: {
+        browser: 'work',
+        args: [Number(record.targets['regular-group'].targetId)],
+      },
+    })
+    assert.equal(regular_tab.incognito, false)
+    assert.notEqual(regular_tab.groupId, private_group, 'each window keeps its own physical group')
+    assert.equal(Object.keys(record.groups['private-work'].window_groups).length, 2)
     await private_call('Network.setCookie', {
       name: 'private',
       value: 'yes',
@@ -677,6 +755,7 @@ test('managed reverse launch uses extension identity and keeps a live process th
     }, {
       name: 'private-other',
       incognito: true,
+      group: 'private-work',
     })).cookies.find(cookie => cookie.name === 'private').value, 'yes')
     assert.equal((await private_call('Network.getCookies', {
       urls: ['http://127.0.0.1/'],

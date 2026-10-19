@@ -171,6 +171,7 @@ Node.js helpers. XPath/options are JSON-encoded into the invocation.
 | `client.browsers[name]` | Browser configuration and live connection/process state. |
 | `record.targets[label]` | Logical target configuration, binding, physical IDs and setup status. |
 | `record.contexts[name]` | Named direct browser context options, native ID and creation/disposal promises. |
+| `record.groups[name]` | Reverse tab-group options, per-window native IDs and the current group operation promise. |
 | `record.target_info[targetId]` | Native target information and current attached session ID. |
 | `record.session_targets[sessionId]` | Reverse lookup of physical target ID. |
 | `socket.pending[id]` | In-flight response wait. |
@@ -284,6 +285,22 @@ on success, timeout and disconnect.
   Require the user's Allow in incognito grant and never enable it automatically.
   The manifest uses spanning mode. Existing regular tabs cannot be converted.
   Generic `chrome.proxy` settings remain profile/incognito scoped, not per tab.
+- `target.group` accepts a name or first-use `{ name, color }` object; unset/false
+  skips grouping. Use existing generic `chrome.tabs` and `chrome.tabGroups` calls
+  in the manager, without adding extension-specific command wrappers. Direct mode
+  rejects before launch because CDP has no tab-group commands. Register the group
+  definition before target creation can yield, and serialize group operations so
+  concurrent targets cannot create duplicates or lose the first color setting.
+  Public `record.groups[name].window_groups[windowId]` holds the last native ID;
+  revalidate it against native groups on each setup. Keep one physical group per
+  window, without moving tabs or mixing normal/incognito windows. Do not adopt
+  unrelated groups by display title. Reapply the logical name as the title and
+  the configured color during setup, even with initialize false. Chrome removes
+  empty groups; retain logical definitions and recreate missing native groups.
+  Cache IDs after grouping, before updating color, so validation failure remains
+  retryable without creating an orphan group on each attempt. Native group errors
+  reject initialization, preserving RPC context. Reverse target info includes
+  native groupId. No new event subscription, accessor API or persistence is needed.
 - Profile preferences use dotted keys and preserve unrelated JSON. Only a missing
   file becomes an empty object; parsing/other filesystem errors propagate.
   The `cdp` manager applies preferences before spawning; `browser.launch` does

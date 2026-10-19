@@ -37,6 +37,7 @@ In Bun, use `bun add @mefistofelix/cdp.js` and the ordinary package import above
 - Browser proxies and named direct-mode contexts with independent proxies/storage
   and automatic cleanup after their last target closes.
 - Incognito targets in direct and reverse modes.
+- Named, colored tab groups through the reverse Chrome extension.
 - Attachment through WebSocket, HTTP discovery or a debugging port.
 - Optional Chrome extension reverse connections through one native Deno/Bun server,
   without browser remote-debugging arguments.
@@ -1273,6 +1274,7 @@ await client.call({
 | `targetId` | `null` | Optional existing physical target ID. Reused if discovered; otherwise create a new target. |
 | `context` | unset | Direct-mode context name or first-use configuration object; see named contexts above. Reverse mode rejects this option. |
 | `incognito` | `false` | Create/select a private target; direct mode uses the shared `'incognito'` context by default, reverse uses a native incognito window with the user's extension grant. |
+| `group` | unset | Reverse-only tab group name or first-use `{ name, color }` configuration. False skips grouping. |
 | `create_params` | `{}` | Native creation overrides, merged over `url: 'about:blank'` and `background: true`; start from a blank target without requesting foreground activation. |
 | `initialize` | `true` | Run the convenience setup sequence; false skips it. |
 | `runtime` | `'bootstrap'` | Enable Runtime for setup, then disable reporting. `true` leaves it enabled; `false` skips both operations. |
@@ -1282,6 +1284,78 @@ await client.call({
 | `focus_emulation` | `true` | Request target focus emulation, including when the actual window is not focused. |
 | `binding` | `'_send_to_cdp'` | Default page-to-host JavaScript binding. String changes its name; false skips installation; true selects the default name. |
 | `background_service` | `true` | Clear, observe and record `pushMessaging` background-service events in Chromium. |
+
+### Named tab groups
+
+With `cdp_ext: true` or external `reverse: true`, set `target.group` when first
+configuring a target:
+
+```js
+await client.call({
+  method: 'Page.navigate',
+  params: {
+    browser: {
+      name: 'work',
+      cdp_ext: true,
+    },
+    target: {
+      name: 'search',
+      group: {
+        name: 'Research',
+        color: 'blue',
+      },
+    },
+    url: 'https://example.com/',
+  },
+})
+await client.call({
+  method: 'Page.navigate',
+  params: {
+    browser: 'work',
+    target: {
+      name: 'notes',
+      group: 'Research',
+    },
+    url: 'https://example.com/notes',
+  },
+})
+```
+
+| Group option | Default | Meaning |
+| --- | --- | --- |
+| `name` | required in an object | Logical name in `record.groups`; also the visible group title. A string reference creates a default group if this name is new. |
+| `color` | unset | Chrome's native color selection for new groups; otherwise retain the current color. Explicit values: `grey`, `blue`, `red`, `yellow`, `green`, `pink`, `purple`, `cyan`, `orange`. |
+
+The first use of a group name records its configuration. Concurrent target
+creation shares that definition and serializes group operations. Names are scoped
+to the logical browser. Each window has its own native group for that name:
+tabs stay in their current window, including separate regular/incognito windows.
+Groups are created by the library, not adopted from unrelated groups that happen
+to have the same visible title. Incognito still requires the bridge's user grant.
+
+Grouping happens before optional CDP setup, including with `initialize: false`.
+It also works with `targetId` selecting an existing tab. As with other target
+options, passing a new group on a target label that was already configured does
+not reconfigure that label. Use another label with its physical `targetId`, or
+edit the public record and reinitialize the target.
+
+Reconnection reapplies the name/color and rejoins a surviving group. If its last
+tab was closed or ungrouped, Chrome removes the native group; later target setup
+creates a new one. `record.groups[name].window_groups[windowId]` stores the last
+known native group ID. These IDs are checked against Chrome during setup and can
+remain stale between operations; no extra event subscriptions or persistence are
+added. In reverse target info, `groupId` is the current native ID, or `-1` when
+ungrouped. Generic `chrome.tabs` / `chrome.tabGroups` calls remain available for
+immediate native updates. Native errors, including invalid colors, reject setup
+with the usual RPC error context and can be retried after correcting the record.
+
+Direct CDP does not expose browser tab-group commands. A non-false `group` option
+therefore rejects before connecting or launching in direct mode. The bridge's
+existing `tabGroups` permission is sufficient; no extra permission is added.
+See [Chrome tab groups](https://developer.chrome.com/docs/extensions/reference/api/tabGroups)
+and [grouping tabs](https://developer.chrome.com/docs/extensions/reference/api/tabs#method-group).
+
+### Target initialization
 
 Domain options set to false skip setup commands; they do not actively disable a
 domain already enabled by another caller. Likewise, `binding: false` does not
@@ -1554,6 +1628,7 @@ dictionary containers have a null prototype.
 | `record.targets[label]` | Target options, physical `targetId`, `sessionId`, `connecting` and `setup_errors` after setup. |
 | `record.contexts[name]` | Recorded context options, native `browserContextId` or null, and pending `connecting`/`closing` promises. Direct mode only. |
 | `record.context_checking` | Pending automatic empty-context cleanup, otherwise unset/null. |
+| `record.groups[name]` | Recorded tab-group options, per-window native IDs in `window_groups`, and a pending `connecting` operation. Reverse only. |
 | `record.target_info[targetId]` | Discovered native target info plus cached `sessionId` when attached. |
 | `record.session_targets[sessionId]` | Physical `targetId` for a session. |
 | `socket.pending[id]` | Response-wait promise, removed on completion. |
@@ -1641,6 +1716,7 @@ labels, target labels, custom methods or reconnection policy in this layer.
 | Failed discovery or local launch | Reject the call establishing the connection. |
 | Named context in reverse mode | Reject explicitly; no separate process emulation. |
 | Reverse incognito without the extension's user grant | Reject with an instruction to enable Allow in incognito. |
+| Tab group in direct mode | Reject before connecting; tab groups require the reverse extension APIs. |
 | Automatic context cleanup fails | Emit the manager's `error` event with browser label and original error. |
 
 ```js
@@ -1688,6 +1764,8 @@ The shared Deno/Bun reverse suite loads the real extension into two headless Chr
 server port without remote-debugging arguments. It checks native/custom calls,
 Network events, webRequest notifications without debugger attachment, bindings,
 child sessions, reconnect, detach/recreate, incognito and isolation.
+Tab-group checks cover concurrent creation, existing tabs, title/color, per-window
+incognito separation, reconnection, recreation and native validation/retry.
 Node coverage also checks actual browser/context proxy routing, shared private
 storage, concurrent context creation, automatic disposal, unselected targets and
 context ownership in externally attached browsers.
