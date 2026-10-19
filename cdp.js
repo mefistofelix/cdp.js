@@ -125,7 +125,10 @@ export class browser {
   }
 
   static build_args(options = {}) {
-    const args = {
+    const args = options.cdp_ext && options.cdp_ext_install === false ? {
+      'user-data-dir': options.user_data_dir,
+      'disable-features': [],
+    } : {
       'enable-automation': true,
       'mute-audio': true,
       'disable-blink-features': 'AutomationControlled',
@@ -264,10 +267,17 @@ export class browser {
         directory === '*' ? installed : directory,
       ))]
     }
-    const proc = child_process.spawn(options.executable_path || browser.find_executable_path(), [...util.args_to_strings(args), 'about:blank'], {
+    const external = options.cdp_ext && options.cdp_ext_install === false
+    const proc = child_process.spawn(options.executable_path || browser.find_executable_path(), [...util.args_to_strings(args), options.bootstrap_url ?? 'about:blank'], {
       windowsHide: options.windowsHide ?? (args.headless != null && args.headless !== false),
-      stdio: ['ignore', 'ignore', 'pipe'],
+      detached: external,
+      stdio: external ? 'ignore' : ['ignore', 'ignore', 'pipe'],
     })
+    if (external) {
+      await once(proc, 'spawn')
+      proc.unref()
+      return { proc }
+    }
     let diagnostic = ''
     const ready = util.on_first(proc, options.cdp_ext ? 'spawn exit' : 'ready exit', options.connect_timeout_ms ?? 15000)
     const data = chunk => {
@@ -359,11 +369,23 @@ export class cdp extends EventTarget {
     if (this.server) throw new Error('Reverse server is already listening')
     const accept = (socket, origin) => {
       socket.addEventListener('message', event => {
-        const id = JSON.parse(event.data).browser
-        if (id !== origin.slice('chrome-extension://'.length) ||
+        const message = JSON.parse(event.data)
+        const id = message.browser
+        const extension_id = message.extension_id ?? id
+        const record = this.browsers[id]
+        if (typeof id !== 'string' || extension_id !== origin.slice('chrome-extension://'.length) ||
+            (record?.reverse_token && message.token !== record.reverse_token) ||
+            (id !== extension_id && !record?.reverse_token) ||
             this.reverse_sockets[id]?.readyState < WebSocket.CLOSING) {
-          return socket.close(1008, 'Invalid or already connected extension ID')
+          return socket.close(1008, 'Invalid or already connected reverse browser')
         }
+        if (message.error) {
+          const error = new Error(message.error)
+          if (record) record.reverse_error = error
+          util.emit(this, 'reverse_' + encodeURIComponent(id), error)
+          return socket.close(1008, 'Chrome profile already connected')
+        }
+        if (record) record.extension_id = extension_id
         this.reverse_sockets[id] = socket
         socket.addEventListener('close', () => {
           if (this.reverse_sockets[id] === socket) delete this.reverse_sockets[id]
@@ -373,6 +395,9 @@ export class cdp extends EventTarget {
       }, { once: true })
     }
     const fetch = (request, server) => {
+      if (request.method === 'GET' && new URL(request.url).pathname === '/cdp_ext') {
+        return new Response('CDP.js browser connection')
+      }
       const origin = request.headers.get('origin')
       if (request.headers.get('upgrade') !== 'websocket' ||
           !origin?.startsWith('chrome-extension://')) {
@@ -594,6 +619,21 @@ export class cdp extends EventTarget {
     if (record.reverse || record.cdp_ext) {
       await this.server_closing
       if (!this.server) this.listen_reverse()
+      let host = this.server.addr.hostname
+      if (host === '0.0.0.0') host = '127.0.0.1'
+      if (host === '::') host = '::1'
+      const address = (host.includes(':') ? '[' + host + ']' : host) + ':' + this.server.addr.port
+      record.reverse_url = 'ws://' + address
+      if (record.cdp_ext) {
+        if (!['127.0.0.1', 'localhost', '::1'].includes(host)) throw new Error('URL bootstrap requires a loopback reverse listener')
+        record.reverse_token ??= crypto.randomUUID()
+        const bootstrap = new URL('http://' + address + '/cdp_ext')
+        bootstrap.searchParams.set('browser', record.name)
+        bootstrap.searchParams.set('websocket_url', record.reverse_url)
+        bootstrap.searchParams.set('token', record.reverse_token)
+        record.bootstrap_url = bootstrap.href
+      }
+      delete record.reverse_error
     }
     let url = record.websocket_url
     if (!record.reverse && !record.cdp_ext && !url && (record.http_url || record.port)) {
@@ -604,10 +644,12 @@ export class cdp extends EventTarget {
       url = (await response.json()).webSocketDebuggerUrl
     }
     if (record.cdp_ext || (!record.reverse && !url)) {
-      if (record.proc?.exitCode === null && record.proc.signalCode === null) url = record.socket?.url
+      const args = browser.build_args(record)
+      if (record.cdp_ext) record.cdp_ext_install ??= !!args['user-data-dir']
+      if ((record.proc?.exitCode === null && record.proc.signalCode === null) ||
+          (record.opener?.exitCode === null && record.opener.signalCode === null)) url = record.socket?.url
       else {
-        const args = browser.build_args(record)
-        if (record.cdp_ext) {
+        if (record.cdp_ext && record.cdp_ext_install) {
           record.extension_path = path.resolve(
             args['user-data-dir'] || path.join(this.base_path, record.name),
             args['profile-directory'] || 'Default',
@@ -617,10 +659,7 @@ export class cdp extends EventTarget {
           record.extension_path = await fs.realpath(record.extension_path)
           record.extension_id = browser.extension_id(record.extension_path)
           const manifest = JSON.parse(await fs.readFile(new URL('./cdp_ext/manifest.json', import.meta.url), 'utf8'))
-          let host = this.server.addr.hostname
-          if (host === '0.0.0.0') host = '127.0.0.1'
-          if (host === '::') host = '::1'
-          manifest.cdp.websocket_url = 'ws://' + (host.includes(':') ? '[' + host + ']' : host) + ':' + this.server.addr.port
+          manifest.cdp.websocket_url = record.reverse_url
           await fs.writeFile(path.join(record.extension_path, 'manifest.json'), JSON.stringify(manifest))
           await fs.copyFile(new URL('./cdp_ext/cdp_ext.js', import.meta.url), path.join(record.extension_path, 'cdp_ext.js'))
         }
@@ -635,17 +674,28 @@ export class cdp extends EventTarget {
             await browser.update_profile_preferences(path.join(args['user-data-dir'], 'Local State'), record.local_state)
           }
         }
-        const launched = await browser.launch(record)
-        record.proc = launched.proc
-        if (record.cdp_ext) record.proc.once('exit', () => this._close_reverse_if_idle())
-        url = launched.url
+        if (!record.cdp_ext || record.cdp_ext_install) {
+          const launched = await browser.launch(record)
+          record.proc = launched.proc
+          if (record.cdp_ext) record.proc.once('exit', () => this._close_reverse_if_idle())
+          url = launched.url
+        }
       }
     }
     if (record.reverse || record.cdp_ext) {
-      const id = record.extension_id ?? record.name
+      const id = record.cdp_ext ? record.name : record.extension_id ?? record.name
       url = this.reverse_sockets[id]
       if (url?.readyState !== WebSocket.OPEN) {
-        url = (await util.on_first(this, 'reverse_' + encodeURIComponent(id), record.connect_timeout_ms ?? 15000)).args[0].detail
+        if (record.cdp_ext && !record.cdp_ext_install &&
+            !(record.opener?.exitCode === null && record.opener.signalCode === null)) {
+          record.opener = (await browser.launch(record)).proc
+        }
+        if (record.reverse_error) throw record.reverse_error
+        url = this.reverse_sockets[id]
+        if (url?.readyState !== WebSocket.OPEN) {
+          url = (await util.on_first(this, 'reverse_' + encodeURIComponent(id), record.connect_timeout_ms ?? 15000)).args[0].detail
+        }
+        if (url instanceof Error) throw url
       }
     }
     const socket = record.socket = new jsrpc(url, record)
@@ -829,7 +879,7 @@ export class cdp extends EventTarget {
     const { browser = 'main', target, ...native } = params
     const spec = typeof browser === 'string' ? { name: browser } : browser
     const record = this.browsers[spec.name] ??= {
-      user_data_dir: path.join(this.base_path, spec.name),
+      user_data_dir: ((spec.reverse ?? this.options.reverse) || (spec.cdp_ext ?? this.options.cdp_ext)) ? null : path.join(this.base_path, spec.name),
       ...this.options,
       ...spec,
       args: {

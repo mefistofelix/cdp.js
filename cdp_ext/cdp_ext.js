@@ -1,4 +1,5 @@
 const config = chrome.runtime.getManifest().cdp ?? {}
+const configured = chrome.storage.session.get('cdp_bootstrap').then(value => Object.assign(config, value.cdp_bootstrap))
 const sessions = {}
 const attached = {}
 const attaching = {}
@@ -6,6 +7,50 @@ let socket
 let disconnecting
 let discovering = false
 let auto_attach = {}
+let bootstrapping
+
+async function bootstrap(tab) {
+  const text = tab.pendingUrl ?? tab.url ?? ''
+  if (!/^http:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?\/cdp_ext\?/.test(text)) return
+  const url = new URL(text)
+  const settings = {
+    browser: url.searchParams.get('browser'),
+    websocket_url: url.searchParams.get('websocket_url'),
+    token: url.searchParams.get('token'),
+  }
+  if (!settings.browser || !settings.websocket_url || !settings.token) return
+  const endpoint = new URL(settings.websocket_url)
+  if (endpoint.protocol !== 'ws:' || endpoint.host !== url.host) return
+  await configured
+  while (bootstrapping) await bootstrapping
+  return bootstrapping = (async () => {
+    const changed = ['browser', 'websocket_url', 'token'].some(key => settings[key] !== config[key])
+    if (changed && config.browser && socket?.readyState < WebSocket.CLOSING) {
+      const probe = new WebSocket(settings.websocket_url)
+      probe.onopen = () => probe.send(JSON.stringify({
+        browser: settings.browser,
+        extension_id: chrome.runtime.id,
+        token: settings.token,
+        error: 'This Chrome profile is already connected as ' + config.browser,
+      }))
+      return
+    }
+    if (changed) {
+      Object.assign(config, settings)
+      await chrome.storage.session.set({ cdp_bootstrap: settings })
+      if (socket && socket.readyState !== WebSocket.CLOSED) {
+        await new Promise(resolve => {
+          socket.addEventListener('close', resolve, { once: true })
+          socket.close()
+        })
+      }
+      await disconnecting
+    }
+    await connect()
+  })().finally(() => {
+    bootstrapping = null
+  })
+}
 
 function send(message) {
   if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message))
@@ -160,12 +205,14 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
 })
 chrome.debugger.onDetach.addListener(detached)
 chrome.tabs.onCreated.addListener(tab => {
+  bootstrap(tab)
   if (discovering) send({
     method: 'Target.targetCreated',
     params: { targetInfo: target_info(tab) },
   })
 })
 chrome.tabs.onUpdated.addListener((id, changes, tab) => {
+  bootstrap(tab)
   if (discovering) send({
     method: 'Target.targetInfoChanged',
     params: { targetInfo: target_info(tab) },
@@ -196,12 +243,17 @@ for (const [name, options] of Object.entries({
   }), { urls: ['<all_urls>'] }, options)
 }
 
-function connect() {
+async function connect() {
+  await configured
   if (disconnecting) return
   if (socket?.readyState === WebSocket.CONNECTING) return
   if (socket?.readyState === WebSocket.OPEN) return socket.send('')
   const connection = socket = new WebSocket(config.websocket_url ?? 'ws://127.0.0.1:9223')
-  connection.onopen = () => connection.send(JSON.stringify({ browser: chrome.runtime.id }))
+  connection.onopen = () => connection.send(JSON.stringify({
+    browser: config.browser ?? chrome.runtime.id,
+    extension_id: chrome.runtime.id,
+    token: config.token,
+  }))
   connection.onmessage = async event => {
     if (!event.data) return
     const request = JSON.parse(event.data)
@@ -257,8 +309,19 @@ function connect() {
   }
 }
 
-chrome.runtime.onStartup.addListener(connect)
+async function start() {
+  await configured
+  if (!config.browser) {
+    for (const tab of (await chrome.tabs.query({})).reverse()) {
+      if (config.browser) break
+      await bootstrap(tab)
+    }
+  }
+  await connect()
+}
+
+chrome.runtime.onStartup.addListener(start)
 chrome.alarms.onAlarm.addListener(connect)
 chrome.alarms.create('cdp-reconnect', { periodInMinutes: 0.5 })
 setInterval(connect, config.reconnect_ms ?? 5000)
-connect()
+start()

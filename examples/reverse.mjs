@@ -2,6 +2,7 @@ import { cdp } from '../cdp.js'
 
 const client = new cdp({
   cdp_ext: true,
+  user_data_dir: '.cdp/example',
   connect_timeout_ms: 60000,
 })
 process.once('SIGINT', () => client.close())

@@ -603,6 +603,7 @@ test('managed reverse launch uses extension identity and keeps a live process th
     const spec = {
       name: 'work',
       cdp_ext: true,
+      extensions: true,
       args: {
         'user-data-dir': path.join(directory, 'pròfile'),
         'profile-directory': 'Profile 1',
@@ -657,10 +658,12 @@ test('managed reverse launch uses extension identity and keeps a live process th
     const original = record.proc
     exited = once(original, 'exit')
     const id = record.extension_id
+    assert.equal(record.cdp_ext_install, true, 'custom directory enables bridge installation by default')
     assert.equal(record.extension_path, await fs.realpath(path.join(directory, 'pròfile', 'Profile 1', 'cdp_ext')))
-    assert.equal(client.reverse_sockets[id], record.socket)
-    assert.equal(client.reverse_sockets.work, undefined, 'logical name stays in the manager')
+    assert.equal(client.reverse_sockets.work, record.socket, 'URL bootstrap announces the logical name')
+    assert.equal(client.reverse_sockets[id], undefined)
     assert.equal(original.spawnargs.some(arg => arg.startsWith('--remote-debugging')), false)
+    assert.ok(original.spawnargs.includes('--disable-extensions-except=' + record.extension_path), 'bridge and enabled-profile wildcard share path expansion and deduplication')
     assert.equal((await fs.readFile(path.join(record.extension_path, 'manifest.json'), 'utf8')).includes('"browser"'), false)
     assert.equal(Object.keys(record.targets).length, 1)
     assert.deepEqual(await client.call({
@@ -806,6 +809,201 @@ test('managed reverse launch uses extension identity and keeps a live process th
     await direct_exited
     page_server.closeAllConnections()
     await new Promise(resolve => page_server.close(resolve))
+  }
+})
+
+test('URL bootstrap reuses normal Chrome and names profiles sharing one extension', async () => {
+  const directory = await fs.mkdtemp(path.resolve('build/tests/bootstrap-'))
+  const client = new cdp({
+    cdp_ext: true,
+    cdp_ext_install: false,
+    reverse_server: { port: 0 },
+    connect_timeout_ms: 20000,
+  })
+  const server = client.listen_reverse()
+  const extension = path.join(directory, 'extension')
+  await fs.mkdir(extension)
+  const manifest = JSON.parse(await fs.readFile('cdp_ext/manifest.json', 'utf8'))
+  manifest.cdp.websocket_url = 'ws://127.0.0.1:' + server.addr.port
+  manifest.cdp.reconnect_ms = 200
+  await fs.writeFile(path.join(extension, 'manifest.json'), JSON.stringify(manifest))
+  await fs.copyFile('cdp_ext/cdp_ext.js', path.join(extension, 'cdp_ext.js'))
+  await fs.appendFile(path.join(extension, 'cdp_ext.js'), `
+chrome.cdp_probe = {
+  announce(url, message) {
+    return new Promise(resolve => {
+      const connection = new WebSocket(url)
+      connection.onopen = () => connection.send(JSON.stringify(message))
+      connection.onclose = event => resolve(event.code)
+    })
+  },
+}
+`)
+  const first_profile = path.join(directory, 'first')
+  const ready = util.on_first(client, 'reverse_' + browser.extension_id(extension))
+  const first = await browser.launch({
+    cdp_ext: true,
+    extension_path: extension,
+    user_data_dir: first_profile,
+    args: {
+      'enable-automation': false,
+      'window-position': '-32000,-32000',
+    },
+  })
+  const first_exited = once(first.proc, 'exit')
+  let second
+  let second_exited
+  const call = (name, method = 'Runtime.evaluate', params = {}, target = 'page') => client.call({
+    method,
+    params: {
+      ...params,
+      browser: name,
+      target,
+    },
+  })
+  try {
+    await ready
+    await client.call({
+      method: 'Runtime.evaluate',
+      params: {
+        browser: {
+          name: 'system-one',
+          extensions: Object.freeze(['*', extension]),
+          preferences: { 'test.bootstrap': true },
+          local_state: { 'test.bootstrap': true },
+          args: {
+            'user-data-dir': first_profile,
+          },
+        },
+        target: 'page',
+        expression: 'window.marker = "one"',
+      },
+    })
+    const record = client.browsers['system-one']
+    assert.equal(record.user_data_dir, null, 'reverse mode does not generate a profile directory')
+    assert.equal(record.proc, undefined, 'opening a bootstrap link does not claim browser ownership')
+    assert.equal(record.extension_id, browser.extension_id(extension))
+    assert.equal(record.cdp_ext_install, false)
+    assert.deepEqual(record.extensions, ['*', extension], 'wildcard expansion preserves caller options')
+    assert.ok(record.opener.spawnargs.includes('--disable-extensions-except=' + extension))
+    assert.equal(JSON.parse(await fs.readFile(path.join(first_profile, 'Default', 'Preferences'), 'utf8')).test.bootstrap, true)
+    assert.equal(JSON.parse(await fs.readFile(path.join(first_profile, 'Local State'), 'utf8')).test.bootstrap, true)
+    assert.equal(client.reverse_sockets['system-one'], record.socket)
+    assert.equal(client.reverse_sockets[record.extension_id], undefined)
+    assert.ok(!record.opener.spawnargs.some(arg => /^--(enable-automation|headless|remote-debugging)/.test(arg)))
+    if (record.opener.exitCode === null) await util.on_first(record.opener, 'exit', 5000)
+    assert.equal(record.opener.exitCode, 0, 'Chrome forwarded the URL to the already running instance')
+    assert.equal(first.proc.exitCode, null)
+    const url = new URL(record.bootstrap_url)
+    assert.equal(url.hostname, '127.0.0.1')
+    assert.equal(url.searchParams.get('browser'), 'system-one')
+    assert.equal(url.searchParams.get('websocket_url'), record.reverse_url)
+    const stored = await call('system-one', 'chrome.storage.session.get', { args: ['cdp_bootstrap'] }, null)
+    assert.equal(stored.cdp_bootstrap.browser, 'system-one')
+    assert.equal(stored.cdp_bootstrap.token, record.reverse_token)
+    assert.deepEqual(await call('system-one', 'chrome.storage.local.get', { args: ['cdp_bootstrap'] }, null), {})
+    const rejected = assert.rejects(client.call({
+      method: 'Browser.getVersion',
+      params: {
+        browser: {
+          name: 'spoof',
+          cdp_ext: false,
+          reverse: true,
+          connect_timeout_ms: 100,
+        },
+      },
+    }), /abort/i)
+    client.browsers.spoof.reverse_token = 'expected-token'
+    assert.equal(await call('system-one', 'chrome.cdp_probe.announce', {
+      args: [record.reverse_url, {
+        browser: 'spoof',
+        extension_id: record.extension_id,
+        token: 'wrong-token',
+      }],
+    }, null), 1008, 'an announcement cannot claim a pending logical name without its token')
+    await rejected
+    await assert.rejects(client.call({
+      method: 'Browser.getVersion',
+      params: {
+        browser: {
+          name: 'alias',
+          args: {
+            'user-data-dir': first_profile,
+          },
+        },
+      },
+    }), /already connected as system-one/)
+    assert.equal((await call('system-one', 'Runtime.evaluate', { expression: 'window.marker' })).result.value, 'one')
+    await client.call({
+      method: 'Runtime.evaluate',
+      params: {
+        browser: {
+          name: 'system-two',
+          args: {
+            'user-data-dir': path.join(directory, 'second'),
+            'disable-extensions-except': [extension],
+            'disable-features': ['DisableDisableExtensionsExceptCommandLineSwitch'],
+            'no-first-run': true,
+            'window-position': '-32000,-32000',
+          },
+        },
+        target: 'page',
+        expression: 'window.marker = "two"',
+      },
+    })
+    second = client.browsers['system-two'].opener
+    second_exited = once(second, 'exit')
+    assert.equal(second.exitCode, null, 'the URL opener starts Chrome when that profile is not running')
+    assert.equal(client.browsers['system-two'].extension_id, record.extension_id, 'both profiles load the same extension directory')
+    assert.notEqual(client.browsers['system-two'].socket, record.socket)
+    assert.deepEqual(Object.keys(client.reverse_sockets).sort(), ['system-one', 'system-two'])
+    assert.equal((await call('system-two', 'Runtime.evaluate', { expression: 'window.marker' })).result.value, 'two')
+    assert.equal((await call('system-one', 'Runtime.evaluate', { expression: 'window.marker' })).result.value, 'one')
+    await client.close()
+    assert.equal(first.proc.exitCode, null, 'manager close preserves reused Chrome')
+    assert.equal(second.exitCode, null, 'manager close preserves Chrome opened through the system-profile path')
+  } finally {
+    second ??= client.browsers['system-two']?.opener
+    if (second && !second_exited && second.exitCode === null) second_exited = once(second, 'exit')
+    await client.close()
+    first.proc.kill()
+    await first_exited
+    second?.kill()
+    await second_exited
+  }
+})
+
+test('extension installation defaults to the effective directory without opening system Chrome', async () => {
+  const launch = browser.launch
+  const client = new cdp({
+    cdp_ext: true,
+    reverse_server: { port: 0 },
+  })
+  browser.launch = async options => {
+    assert.equal(options.cdp_ext_install, false)
+    assert.equal(options.args['user-data-dir'] ?? null, null)
+    assert.equal(new URL(options.bootstrap_url).searchParams.get('browser'), options.name)
+    throw new Error('Link opening intercepted')
+  }
+  try {
+    await assert.rejects(client.call({ method: 'Browser.getVersion' }), /Link opening intercepted/)
+    assert.equal(client.browsers.main.user_data_dir, null)
+    assert.equal(client.browsers.main.extension_path, undefined)
+    assert.equal(client.server, null)
+    await assert.rejects(client.call({
+      method: 'Browser.getVersion',
+      params: {
+        browser: {
+          name: 'raw-override',
+          user_data_dir: path.resolve('build/tests/not-created'),
+          args: { 'user-data-dir': null },
+        },
+      },
+    }), /Link opening intercepted/)
+    assert.equal(client.browsers['raw-override'].extension_path, undefined)
+  } finally {
+    browser.launch = launch
+    await client.close()
   }
 })
 

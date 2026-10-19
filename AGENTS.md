@@ -11,7 +11,7 @@ Apply the user's current instructions to the task at hand.
 | --- | --- |
 | `cdp.js` | Complete maintained implementation, an ES module importing only Node.js built-ins. |
 | `tests/cdp.test.js` | Node/Bun test-runner coverage with real headless Chromium. |
-| `tests/reverse.test.js` | Shared Deno/Bun coverage with the real extension and headless Chrome; reverse execution uses no remote-debugging flags. Direct CDP prepares disposable user-script/incognito grant fixtures. |
+| `tests/reverse.test.js` | Shared Deno/Bun coverage with the real extension and headless/normal Chrome; reverse execution uses no remote-debugging flags. Direct CDP prepares disposable user-script/incognito grant fixtures. |
 | `cdp_ext/` | Manifest V3 reverse transport: one Chrome worker and its configurable manifest. |
 | `examples/reverse.mjs` | Native Deno/Bun server example. |
 | `tests/chat-monitoring.md` | Manual application traffic inspection and tool-session extraction recipe. |
@@ -75,18 +75,36 @@ pending reverse initialization or live owned reverse process needs it. Direct
 browsers do not retain it. Process exits, socket closes and initialization
 settlement trigger the idle check. Wait for `server_closing` before restarting;
 never bind the replacement while the previous listener is still shutting down.
-The first JSON message announces `{ browser: chrome.runtime.id }`; do not assign
-separate ports or URL paths per browser or put logical names in the manifest.
-`reverse_sockets` is a public object keyed by extension ID. Validate it against
-the captured upgrade origin, reject duplicate live IDs and keep old close events
-from deleting their replacement. `reverse: true` attaches externally, using
-`extension_id` or the browser name as the incoming ID. It never launches or writes
-profile files. `cdp_ext: true` instead starts the shared listener if needed and
-launches an owned process with a generated extension copy in the effective profile
-directory (or under the named base-path profile when no directory is configured).
-The copy sets only the server URL, never the logical name. Its path-derived
-Chromium ID is recorded in `record.extension_id`; `record.extension_path` is
-canonical. Preserve platform-specific path encoding in `browser.extension_id`.
+`cdp_ext: true` implies reverse listening and opening a loopback HTTP URL with
+the logical browser name, shared WebSocket endpoint and generated binding token.
+No separate reverse/bootstrap switch or user-supplied extension ID is required.
+The first announcement contains `{ browser, extension_id, token }`.
+`reverse_sockets` is keyed by logical name. Validate the native extension ID
+against the captured upgrade origin and the token against the pending record.
+Reject duplicate live names and keep stale close events from deleting replacements.
+One extension directory can serve multiple profiles; a conflicting live binding
+returns an error instead of stealing or aliasing that profile's connection.
+The extension reads startup tabs and URL changes, saving only bootstrap settings
+in native `chrome.storage.session`, never manager session/target mappings.
+Accept only loopback bootstrap URLs with a same-host/port WebSocket endpoint.
+`reverse: true` remains passive attachment by native `extension_id` or browser
+label and never opens a URL or writes profile files.
+
+Extension mode defaults to no `user_data_dir`, letting Chrome select its system
+profile. `cdp_ext_install` defaults to presence of an effective custom directory,
+including raw overrides. True prepares the copy and startup loading switches;
+false uses an already installed extension with the same argument generation and
+wildcard expansion, skipping only the automation preset. Preference writes are
+independently controlled by `update_preferences` and require a directory.
+This launcher is `record.opener`, unowned
+and preserved on manager close. A forwarding launcher's exit is not browser exit.
+Forced installation with no directory places only the extension copy under the
+named base-path profile directory and omits the user-data switch. Never infer
+system profile paths for preference writes. Chrome cannot apply new extension
+loading switches to an already running instance.
+The copy sets only the server URL, never the logical name. Its canonical path is
+`record.extension_path`; the native ID is `record.extension_id`.
+Preserve platform-specific path encoding in `browser.extension_id`.
 An unpacked manifest must have no `key` for this path-derived identity.
 Closing the manager stops owned processes, incoming sockets and the listener,
 and disposes managed named contexts. Preserve external browser processes and
@@ -318,8 +336,10 @@ on success, timeout and disconnect.
   explicit true still cannot write files without a directory.
 - `browser.launch` returns `{ proc, url }` and opens no CDP socket. Track owned
   processes separately from attachments. With `cdp_ext: true`, it waits for spawn
-  instead of a DevTools endpoint and returns an undefined `url`; the manager must
-  prepare the extension copy and supply `extension_path` first. Generated flags
+  instead of a DevTools endpoint and returns an undefined `url`; with installation
+  enabled the manager prepares the copy and supplies `extension_path` first.
+  Installation disabled uses the shared CLI/wildcard handling without the automation
+  preset, returning an unreferenced launcher stored in `record.opener`. Generated flags
   select the bridge and omit remote debugging, then raw arguments override them.
   An extensions array adds its paths; `extensions: true` adds the profile wildcard.
   `browser.launch` does not copy the extension or manage incoming connections.

@@ -25,8 +25,8 @@ import api, { util, jsrpc, browser, cdp } from '@mefistofelix/cdp.js'
 The npm package exports the same file and API. Direct file imports in the examples
 below remain supported. Publication metadata is isolated in `npm/`.
 The package includes both `cdp_ext/` files. With `cdp_ext: true`, the manager
-writes a configured extension copy into the browser's profile directory and loads
-it automatically; no manual extraction or build is needed. Reverse mode still
+prepares and loads the extension automatically with a custom user-data directory.
+The system profile uses an already installed extension by default. Reverse mode still
 requires Deno or Bun. In Deno, import from `npm:@mefistofelix/cdp.js`.
 In Bun, use `bun add @mefistofelix/cdp.js` and the ordinary package import above.
 
@@ -189,7 +189,7 @@ belong in `params.target` and do not inherit from the constructor.
 
 For a new browser record, configuration is assembled in this order:
 
-1. Default `user_data_dir` derived from `base_path` and the browser name.
+1. Default `user_data_dir`: unset in extension/passive reverse mode, otherwise derived from `base_path` and the browser name.
 2. Constructor browser options.
 3. The `params.browser` configuration object.
 
@@ -225,7 +225,7 @@ local configuration.
 | `base_path` | string, `'.cdp'` | Constructor-only profile root, resolved against the working directory. |
 | `reverse_server` | object, `{}` | Constructor-only settings for the shared lazy listener: `hostname` defaults to `'127.0.0.1'`, `port` to `9223`. Independent of browser attachment `host`/`port`. |
 | `name` | string, `'main'` when routing is omitted | Required in a browser configuration object; dictionary key and default profile directory label. |
-| `user_data_dir` | absolute path string or `null`, `<base_path>/<name>` | Chromium user-data directory containing profiles such as `Default`. Explicit paths should be absolute. `null` omits the switch and skips manager preference-file writes; Chromium selects its system directory. |
+| `user_data_dir` | absolute path string or `null`, `null` in extension/passive reverse mode, otherwise `<base_path>/<name>` | Chromium user-data directory containing profiles such as `Default`. Explicit paths should be absolute. `null` omits the switch and skips manager preference-file writes; Chromium selects its system directory. |
 | `executable_path` | string, automatic discovery | Executable to spawn; takes precedence over `CDP_BROWSER`. |
 | `headless` | boolean, `false` | When true, add `headless: 'new'` and default `window-size: '1440,900'`. |
 | `windowsHide` | boolean, effective headless mode | Hide the spawned process's console on Windows. Defaults to true when the final arguments include `--headless`, false otherwise; an explicit value wins. Does not hide the parent terminal. |
@@ -242,9 +242,10 @@ local configuration.
 | `request_timeout_ms` | number, `30000` | Default timeout for each protocol request on this browser's socket. |
 | `waitForDebuggerOnStart` | boolean, `false` | Ask Chromium to pause newly auto-attached targets. Applied to `Target.setAutoAttach` when connecting; not a CLI argument or target option. |
 | `websocket_url` | string, unset | Attach directly to a browser WebSocket endpoint. |
-| `cdp_ext` | boolean, `false` | Launch with the reverse extension under Deno or Bun. Start one shared server automatically if needed, prepare a profile-specific extension copy and wait for its connection. |
+| `cdp_ext` | boolean, `false` | Use the extension transport under Deno/Bun: start the shared reverse listener and open a local bootstrap URL containing the logical browser name and WebSocket endpoint. No extension ID is required. |
+| `cdp_ext_install` | boolean, presence of an effective user-data directory | Prepare an extension copy and startup loading arguments. Defaults on for an explicit custom directory, off for the system profile. `false` uses an already installed extension. Only applies with `cdp_ext: true`. |
 | `reverse` | boolean, `false` | Attach to an externally launched extension instead of launching or discovering a browser. Starts the shared listener on first use under Deno or Bun. |
-| `extension_id` | string, browser name for external reverse attachment | Incoming extension ID to associate with this logical browser. Set automatically for managed `cdp_ext` launches. |
+| `extension_id` | string, browser name for passive `reverse: true` attachment | Optional legacy incoming extension identity. Not needed with `cdp_ext: true`; observed automatically from the connection. |
 | `http_url` | string, unset | Discover the endpoint from an HTTP(S) base URL or exact `/json/version` URL. |
 | `port` | number, unset | Discover an existing browser at `http://<host>:<port>/json/version`. |
 | `host` | string, `'127.0.0.1'` | Host used with `port`. |
@@ -492,8 +493,8 @@ can configure its native incognito scope. See
 [cdp_ext/manifest.json](cdp_ext/manifest.json) and
 [cdp_ext/cdp_ext.js](cdp_ext/cdp_ext.js) form a Manifest V3 extension for Chrome
 125+. The extension connects out to one WebSocket server. The server serves all
-browser instances on the same port; each extension announces its native ID
-in its first message. No remote-debugging argument is needed.
+browser instances on the same port; bootstrapped extensions announce the logical
+browser name and native extension ID. No remote-debugging argument is needed.
 
 Run the server under Deno using its native
 [WebSocket upgrade](https://docs.deno.com/api/deno/websockets/) or under Bun using
@@ -513,6 +514,7 @@ const result = await client.call({
     browser: {
       name: 'work',
       cdp_ext: true,
+      user_data_dir: '/absolute/path/to/work-profile',
       headless: true,
     },
     target: 'demo',
@@ -521,64 +523,83 @@ const result = await client.call({
 })
 ```
 
-The manager copies the two extension files into `cdp_ext/` inside the effective
-profile directory, sets the shared server URL in that copy's manifest and loads
-it before browser startup. Without an effective user-data directory, the copy
-lives under `base_path/<name>/<profile-directory>/` instead (`Default` when unset);
-Chromium still uses its system profile. Profile preferences follow the existing
-`update_preferences` rules.
-The generated launch arguments omit remote debugging and enable this extension.
-An `extensions` array also selects those directories; `extensions: true` keeps
-normally enabled profile extensions through `'*'`. Raw `args` still win and can
-prevent the bridge from loading or connecting, causing a connection timeout.
+With just `cdp_ext: true`, Chrome uses its system user-data directory. No
+`user-data-dir` switch is added. An already installed and enabled bridge reads
+the local URL and connects to the waiting manager. The user enters no extension
+ID or WebSocket address. Load the package's `cdp_ext/` once through
+`chrome://extensions` (developer mode, Load unpacked); reload it after upgrading.
 
-For external attachment, load unpacked `cdp_ext/` through `chrome://extensions`
-or the [local-extension argument options](#local-extensions-at-startup).
-Use its ID shown in Chrome, or `browser.extension_id(directory)`, as the
-browser option `extension_id`. The logical `name` stays in the manager.
+```js
+const client = new cdp({
+  cdp_ext: true,
+})
+await client.call({
+  method: 'Browser.getVersion',
+  params: { browser: 'work' },
+})
+```
 
-The extension configuration is read from `chrome.runtime.getManifest()`:
+Provide `user_data_dir` or raw `args['user-data-dir']` to choose a custom
+directory. An effective custom directory makes `cdp_ext_install` default to true:
+the manager copies the two extension files into
+`<user-data-dir>/<profile-directory>/cdp_ext/` (`Default` when unset), sets the
+shared server URL in that manifest and adds startup loading flags. Normal launch
+options and profile preferences then apply. Set `cdp_ext_install: false` to use
+an extension already installed in that profile, or true to force preparation and
+loading. A null/false raw directory override makes automatic installation default off.
+
+Forced installation without a directory places only the extension copy under
+`<base_path>/<name>/<profile-directory>/cdp_ext/`; Chrome still selects its system
+profile. The manager never infers system profile paths for preference writes.
+Loading switches apply only at Chrome startup. An already running Chrome cannot
+load a new extension from a forwarded command line: install it once or restart
+that Chrome before forcing installation.
+
+With installation disabled, opening the link skips the automation launch preset
+so normal Chrome can forward the URL into its existing instance. High-level
+headless, proxy, image, translation, login and extension options still generate
+their flags, followed by raw overrides and the same enabled-only wildcard
+expansion. The manager does not claim ownership of Chrome. Preference writes are
+independent of extension installation: `update_preferences` controls them and
+they require an explicit directory. A running instance does not apply new flags.
+With installation
+enabled, the normal launch preset applies, generated flags omit remote debugging
+and enable the bridge. An `extensions` array adds its directories;
+`extensions: true` retains enabled profile extensions through `'*'`. Raw `args`
+still win and can prevent loading or connection.
+
+The manager opens an actual local HTTP URL on the shared listener, for example
+`http://127.0.0.1:9223/cdp_ext?browser=work&websocket_url=...&token=...`.
+The port is the effective listening port, including an automatically allocated
+port for `reverse_server.port: 0`. Name, WebSocket URL and generated binding token
+are internal bootstrap parameters, not additional user options. The extension
+observes startup tabs, tab creation and URL changes. Bootstrap accepts only
+loopback HTTP URLs with a WebSocket endpoint on the same host/port. The bootstrap
+tab remains open.
+
+The first announcement contains `{ browser, extension_id, token }`. The browser
+field is the logical label; `extension_id` is `chrome.runtime.id` and must match
+the upgrade origin. The token must match the pending manager record. One extension
+directory and native ID can therefore serve multiple profiles with distinct
+logical labels. No logical name is written into a manifest. Bootstrap settings
+use `chrome.storage.session` to survive worker restarts; they disappear on browser
+restart or extension reload. Manager browser/target/session mappings remain in memory.
+
+A profile has one active logical connection. A link requesting another name or
+manager while connected returns an explicit error, preserving the existing
+connection. After disconnection, a new bootstrap can rebind it.
+
+Passive external attachment remains available through `reverse: true`: it opens
+no URL and waits for `extension_id` (or the browser label). Without bootstrap,
+the extension announces its native ID and uses its manifest endpoint. This
+compatibility mode is optional; `cdp_ext: true` needs neither `reverse` nor an ID.
+
+The manifest's `cdp` configuration supplies initial connection defaults:
 
 | Manifest `cdp` key | Default | Meaning |
 | --- | --- | --- |
-| `websocket_url` | `ws://127.0.0.1:9223` | The shared server endpoint. Port 9223 avoids the usual direct CDP port 9222. |
-| `reconnect_ms` | `5000` | Connection retry interval while the extension worker is awake; also the empty-message heartbeat interval while connected. Use a positive value below 30000. |
-
-The first message uses `chrome.runtime.id`, not a configured logical browser name.
-For an unpacked extension without a manifest `key`, Chromium derives this ID from
-its directory. Managed launches use a separate directory for each profile, so
-the ID is stable across reconnects and restarts, and the manager knows which
-browser it belongs to. External instances must likewise use distinct extension
-directories. Moving the directory changes the ID. The server rejects duplicate
-live IDs and announcements that differ from the WebSocket's `chrome-extension://`
-origin. This is routing information, not an authentication credential.
-
-```js
-import { browser, cdp } from './cdp.js'
-
-const client = new cdp({
-  reverse: true,
-  connect_timeout_ms: 60000,
-  reverse_server: {
-    hostname: '127.0.0.1',
-    port: 9223,
-  },
-})
-const result = await client.call({
-  method: 'Runtime.evaluate',
-  params: {
-    browser: {
-      name: 'other',
-      reverse: true,
-      extension_id: browser.extension_id('/absolute/path/to/cdp_ext'),
-    },
-    target: 'demo',
-    expression: 'document.title',
-  },
-})
-console.log(result.result.value)
-await client.close()
-```
+| `websocket_url` | `ws://127.0.0.1:9223` | Initial shared endpoint; URL bootstrap overrides it. |
+| `reconnect_ms` | `5000` | Awake retry and connected heartbeat interval; use a positive value below 30000. |
 
 Construction and direct CDP calls do not start a listener. The first browser call
 using `reverse: true` or `cdp_ext: true` starts the shared server lazily, with the
@@ -616,7 +637,8 @@ Native Bun WebSocket limits still apply.
 Reverse calls reuse the normal target setup, custom handlers, mappings, routed
 events, request correlation, timeout and error behavior. `reverse: true` alone
 attaches externally: the manager neither launches nor updates that browser.
-`cdp_ext: true` owns the launched process and applies normal launch preferences.
+`cdp_ext_install: true` owns the launched process and applies normal launch preferences.
+With installation off, Chrome is external and remains open on manager close.
 Closing the manager closes owned processes and the server, while external
 browsers and tabs remain open. The extension retries when the server returns;
 the next call rebuilds discovery and sessions, preserving surviving target IDs.
@@ -628,20 +650,11 @@ for that extension to reconnect; they do not spawn another process. Only the
 child process's confirmed exit permits a new launch. Explicit manager `close()`
 still terminates owned browsers.
 
-The current reverse registration uses a profile-specific extension copy. It does
-not assign a new logical name to an already running Chrome using a shared extension
-directory. Unpacked `chrome.runtime.id` identifies the extension path, not the
-user-data directory or browser executable. Shared-path registration and URL-based
-bootstrap are tracked in [TODO.md](TODO.md), not implemented behavior.
-
-Chrome's [process singleton](https://github.com/chromium/chromium/blob/main/chrome/browser/process_singleton.h)
-uses the user-data directory to decide whether to forward a new launch to an
-existing instance. `no-default-browser-check` only suppresses the default-browser
-prompt. The current Chromium [notification callback](https://github.com/chromium/chromium/blob/main/chrome/browser/chrome_browser_main.cc)
-rejects forwarding when either command line enables automation or uses headless
-mode. This library generates `enable-automation` by default; a normal browser
-started with `args['enable-automation']: false` can behave differently. Do not
-infer ownership of the real browser from a short-lived forwarding process.
+Chrome selects an existing instance by user-data directory. The minimal link
+opener preserves this normal behavior. Automation/headless flags can prevent
+forwarding; `no-default-browser-check` only suppresses a prompt. The short-lived
+launcher is `record.opener`; its exit is not proof of browser exit. Installed
+launches use `record.proc` instead.
 
 The [service-worker lifecycle](https://developer.chrome.com/docs/extensions/develop/concepts/service-workers/lifecycle)
 allows termination while offline. A 30-second Chrome alarm wakes the worker for
@@ -651,8 +664,8 @@ These are transport messages, not event buffering or polling of browser state.
 
 ### Reverse protocol and supported commands
 
-The first extension-to-server message is `{ "browser": "<extension ID>" }`. Subsequent
-messages use existing CDP envelopes:
+The first announcement contains `{ browser, extension_id, token }` for bootstrap,
+or the native extension ID for passive attachment. Subsequent messages use CDP envelopes:
 
 - Request: `{ id, method, params, sessionId? }`.
 - Response: `{ id, result }` or `{ id, error: { code, message } }`.
@@ -1618,8 +1631,8 @@ dictionary containers have a null prototype.
 | `client.reverse_server` | Shared listener configuration; the effective hostname/port are stored after startup. |
 | `client.custom_methods[name]` | Handler function. |
 | `client.browsers[name]` | Browser configuration fields plus live state. |
-| `client.reverse_sockets[extension_id]` | Announced incoming socket, available even before the first call; native on Deno, an EventTarget adapter on Bun. |
-| `record.extension_id`, `record.extension_path` | Expected extension identity and the managed copy's canonical directory. |
+| `client.reverse_sockets[browser_name]` | Announced socket (native extension ID for passive attachment); native on Deno, an EventTarget adapter on Bun. |
+| `record.extension_id`, `record.extension_path` | Observed native extension identity and, when installed by the manager, the copy's canonical directory. |
 | `client.server` | Current native Deno/Bun reverse server with shared lifecycle fields, or unset/null when not listening. |
 | `client.server_closing` | Shutdown promise while the reverse listener is stopping, otherwise unset/null. |
 | `record.socket` | Current `jsrpc` connection once created. |
@@ -1677,7 +1690,10 @@ try {
 `browser.launch` builds arguments, starts the process, reads the
 DevTools WebSocket URL from stderr and returns `{ proc, url }`. With `cdp_ext: true`,
 it waits for process spawn instead and returns `url: undefined`; the caller must
-prepare the extension and supply its directory as `extension_path`.
+prepare the extension and supply its directory as `extension_path` when loading
+it. With `cdp_ext_install: false`, the helper skips the automation preset, uses
+the same option/argument/wildcard handling, and returns an unreferenced launcher.
+`bootstrap_url` is the optional startup URL, defaulting to `about:blank`.
 It does not open a CDP connection or write preference files; `update_preferences`, `preferences`
 and `local_state` are manager options, ignored by this helper.
 To prepare files independently, call
@@ -1784,5 +1800,10 @@ Managed-launch coverage checks concurrent first use, profile-specific identity,
 connection timeout without process replacement, lazy listener startup/shutdown
 independent of direct browsers, and relaunch after confirmed exit. External reverse
 timeouts release the listening port; other live reverse connections retain it.
+URL bootstrap also uses disposable normal Chrome profiles to check reuse of an
+already running instance, startup when absent, one shared extension directory,
+logical names, binding tokens, conflicting names and preservation on manager close.
+Installation defaults, raw directory overrides, profile writes independent of
+installation and shared wildcard expansion are covered without opening personal profiles.
 The npm tarball contains `package.json`, `cdp.js`, `README.md` and the two extension
 files required by managed reverse launches.
