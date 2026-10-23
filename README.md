@@ -531,6 +531,19 @@ the local URL and connects to the waiting manager. The user enters no extension
 ID or WebSocket address. Load the package's `cdp_ext/` once through
 `chrome://extensions` (developer mode, Load unpacked); reload it after upgrading.
 
+After accepting a trigger, the extension records `cdp_ext.trigger` in its debug
+sidebar and closes that trigger tab automatically, including when the server is
+currently offline. If it is Chrome's only tab, it becomes the extension's
+**CDP.js connection** page instead, keeping Chrome available for subsequent calls.
+This reuses the debug view and displays the logical browser and live connected/
+waiting status; it never claims a connection before one exists. No extra
+tab is created. Other loopback pages are preserved: only the exact `/cdp_ext`
+route with non-empty `browser`, `websocket_url` and `token` parameters and a
+same-host/port `ws:` endpoint is accepted. The tab URL is checked again before
+cleanup, so a tab already navigated elsewhere is left alone. Duplicate tab updates
+reuse the trigger's diagnostic entry. A conflicting live browser binding is
+reported and its trigger page is cleaned up without replacing the connection.
+
 ```js
 const client = new cdp({
   cdp_ext: true,
@@ -706,10 +719,12 @@ root tabs. A routing session does not imply debugger attachment. It works before
 the first trigger too, displaying **Waiting for trigger** without starting a
 server connection.
 
-The most recent 50 incoming commands appear newest first, with request ID,
+The most recent 50 commands and trigger entries appear newest first, with request ID,
 method, optional session ID/execution mode, running/done/error status, elapsed milliseconds and
 error text. This is command metadata only: parameters, results and the trigger
-token are not included. Empty heartbeat messages and CDP events are not logged.
+token are not included. Trigger entries show the tab ID, browser label, endpoint
+and cleanup action; the full trigger URL is never recorded. Empty heartbeat
+messages and CDP events are not logged.
 **Clear** empties this history without cancelling commands or changing the
 connection. Reopening the panel retrieves the current snapshot; a worker restart
 or extension reload clears the history. No debug history is written to storage.

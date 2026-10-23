@@ -20,7 +20,8 @@
   small { display: block; opacity: .7; margin-top: 5px; font-size: 12px; }
   .error { color: light-dark(#b42318, #ff938a); white-space: pre-wrap; overflow-wrap: anywhere; }
 </style>
-<header><h1>CDP.js debug</h1><button id="clear" type="button" title="Clear command history">Clear</button></header>
+<header><h1>CDP.js debug</h1><button id="clear" type="button" title="Clear diagnostic history">Clear</button></header>
+<p id="connection-message" hidden>Browser bridge configured. Live connection status is shown below.</p>
 <p id="status" role="status">Connecting to extension…</p>
 <dl>
   <dt>Browser</dt><dd id="browser">—</dd>
@@ -29,8 +30,8 @@
   <dt>Routing sessions</dt><dd id="sessions">0</dd>
   <dt>Debugger tabs</dt><dd id="debugger_tabs">0</dd>
 </dl>
-<h2>Recent commands <small>Latest 50 · memory only</small></h2>
-<p id="empty">No commands received.</p>
+<h2>Recent activity <small>Latest 50 · memory only</small></h2>
+<p id="empty">No activity received.</p>
 <ol id="commands"></ol>
 <script src="sidebar.js"></script>
 </html>

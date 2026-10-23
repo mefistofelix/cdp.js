@@ -15,6 +15,18 @@ let connection_message
 const debug_commands = []
 const debug_ports = []
 
+function debug_record(fields) {
+  const record = {
+    time: Date.now(),
+    ...fields,
+    status: 'running',
+  }
+  debug_commands.unshift(record)
+  debug_commands.length = Math.min(debug_commands.length, 50)
+  debug_update()
+  return record
+}
+
 function debug_update() {
   const state = {
     status: connection_message ?? (config.browser ? 'Connecting to server' : 'Waiting for trigger'),
@@ -68,31 +80,62 @@ async function bootstrap(tab) {
   await configured
   while (bootstrapping) await bootstrapping
   return bootstrapping = (async () => {
-    const changed = ['browser', 'websocket_url', 'token'].some(key => settings[key] !== config[key])
-    if (changed && config.browser && socket?.readyState < WebSocket.CLOSING) {
-      const probe = new WebSocket(settings.websocket_url)
-      probe.onopen = () => probe.send(JSON.stringify({
-        browser: settings.browser,
-        extension_id: chrome.runtime.id,
-        token: settings.token,
-        error: 'This Chrome profile is already connected as ' + config.browser,
-      }))
-      return
-    }
-    if (changed) {
-      Object.assign(config, settings)
-      connection_message = undefined
-      debug_update()
-      await chrome.storage.session.set({ cdp_bootstrap: settings })
-      if (socket && socket.readyState !== WebSocket.CLOSED) {
-        await new Promise(resolve => {
-          socket.addEventListener('close', resolve, { once: true })
-          socket.close()
-        })
+    const tabs = await chrome.tabs.query({})
+    if (!tabs.some(current => current.id === tab.id && (current.pendingUrl ?? current.url) === text)) return
+    const trigger = debug_commands.find(record => record.method === 'cdp_ext.trigger' &&
+      record.tabId === tab.id && record.browser === settings.browser && record.endpoint === settings.websocket_url) ?? debug_record({
+      method: 'cdp_ext.trigger',
+      tabId: tab.id,
+      browser: settings.browser,
+      endpoint: settings.websocket_url,
+    })
+    try {
+      const changed = ['browser', 'websocket_url', 'token'].some(key => settings[key] !== config[key])
+      if (changed && config.browser && socket?.readyState < WebSocket.CLOSING) {
+        const probe = new WebSocket(settings.websocket_url)
+        trigger.error = 'This Chrome profile is already connected as ' + config.browser
+        probe.onopen = () => probe.send(JSON.stringify({
+          browser: settings.browser,
+          extension_id: chrome.runtime.id,
+          token: settings.token,
+          error: trigger.error,
+        }))
+      } else {
+        if (changed) {
+          Object.assign(config, settings)
+          connection_message = undefined
+          debug_update()
+          await chrome.storage.session.set({ cdp_bootstrap: settings })
+          if (socket && socket.readyState !== WebSocket.CLOSED) {
+            await new Promise(resolve => {
+              socket.addEventListener('close', resolve, { once: true })
+              socket.close()
+            })
+          }
+          await disconnecting
+        }
+        await connect()
       }
-      await disconnecting
+      const current_tabs = await chrome.tabs.query({})
+      const current = current_tabs.find(current => current.id === tab.id)
+      if ((current?.pendingUrl ?? current?.url) === text) {
+        if (current_tabs.length === 1) {
+          await chrome.tabs.update(tab.id, { url: chrome.runtime.getURL('sidebar.html?connection') })
+          trigger.action = 'opened connection page'
+        } else {
+          await chrome.tabs.remove(tab.id)
+          trigger.action = 'closed tab'
+        }
+      }
+      trigger.status = trigger.error ? 'error' : 'done'
+    } catch (error) {
+      trigger.status = 'error'
+      trigger.error = error.message
+      throw error
+    } finally {
+      trigger.duration_ms = Date.now() - trigger.time
+      debug_update()
     }
-    await connect()
   })().finally(() => {
     bootstrapping = null
   })
@@ -341,17 +384,12 @@ async function connect() {
     if (!event.data) return
     const request = JSON.parse(event.data)
     const { method, params = {}, sessionId, id } = request
-    const command = {
-      time: Date.now(),
+    const command = debug_record({
       id,
       method,
       sessionId,
       execution_mode: params.execution_mode,
-      status: 'running',
-    }
-    debug_commands.unshift(command)
-    debug_commands.length = Math.min(debug_commands.length, 50)
-    debug_update()
+    })
     let response
     try {
       let result

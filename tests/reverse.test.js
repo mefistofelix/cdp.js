@@ -33,6 +33,16 @@ test('reverse targets and XPath default to browser APIs, with explicit debugger 
     params: { ...params, target },
   })
   try {
+    await call('Browser.getVersion', {}, null)
+    let startup_tabs
+    for (let i = 0; i < 100; i++) {
+      startup_tabs = await call('chrome.tabs.query', { args: [{}] }, null)
+      if (startup_tabs[0]?.title === 'CDP.js connection') break
+      await new Promise(resolve => setTimeout(resolve, 30))
+    }
+    assert.equal(startup_tabs.length, 1)
+    assert.equal(startup_tabs[0].url, 'chrome-extension://' + client.browsers.main.extension_id + '/sidebar.html?connection', 'the sole trigger becomes the connection status page')
+    assert.equal(startup_tabs[0].title, 'CDP.js connection')
     await call('chrome.tabs.query', { args: [{}] }, Object.freeze({
       name: 'api',
       group: { name: 'API tabs', color: 'green' },
@@ -268,7 +278,7 @@ chrome.cdp_probe = {
     assert.deepEqual(Object.keys(record.socket.pending), [])
     const targets = await call('Target.getTargets', {}, null)
     assert.equal(targets.targetInfos.some(info => info.targetId === targetId), true)
-    assert.equal(targets.targetInfos.filter(info => info.type === 'page').length, 2, 'initial blank tab survives')
+    assert.equal(targets.targetInfos.some(info => info.url.includes('/cdp_ext?')), false, 'the trigger URL is removed after binding')
     const version = await call('Browser.getVersion', {}, null)
     assert.match(version.product, /Chrome/)
     assert.deepEqual(await call('chrome.sidePanel.getPanelBehavior', {}, null), { openPanelOnActionClick: true })

@@ -951,7 +951,7 @@ test('extension waits for a trigger and retries an absent server without WebSock
   }
   const sidebar = { name: 'debug-sidebar' }
   await call(client, 'Page.navigate', {
-    url: 'chrome-extension://' + browser.extension_id(extension) + '/sidebar.html',
+    url: 'chrome-extension://' + browser.extension_id(extension) + '/sidebar.html?connection',
   }, sidebar)
   const read_sidebar = async condition => (await call(client, 'Runtime.evaluate', {
     expression: `new Promise(resolve => {
@@ -971,22 +971,37 @@ test('extension waits for a trigger and retries an absent server without WebSock
     awaitPromise: true,
     returnByValue: true,
   }, sidebar)).result.value
-  assert.match(await read_sidebar("document.querySelector('#status')?.textContent === 'Waiting for trigger'"), /No commands received/)
+  assert.match(await read_sidebar("document.querySelector('#status')?.textContent === 'Waiting for trigger'"), /No activity received/)
+  assert.match(await read_sidebar("document.title === 'CDP.js connection' && !document.querySelector('#connection-message').hidden"), /Browser bridge configured/)
   await evaluate('Promise.all([connect(), connect(), connect()])')
   assert.deepEqual(messages, [], 'no connection attempts or status noise before the trigger')
   assert.equal(websockets, 0)
   const trigger = 'http://127.0.0.1:' + port + '/cdp_ext?' + new URLSearchParams({
     browser: 'offline-fixture',
     websocket_url: 'ws://127.0.0.1:' + port,
-    token: 'fixture',
+    token: 'secret-trigger-token',
   })
-  await evaluate('bootstrap({ url: ' + JSON.stringify(trigger) + ' })')
+  const unrelated_tabs = []
+  for (const url of [
+    trigger.replace('/cdp_ext?', '/other?'),
+    'http://127.0.0.1:' + port + '/cdp_ext?browser=missing-arguments',
+    trigger.replace('websocket_url=', 'wrong_parameter='),
+  ]) unrelated_tabs.push((await call(client, 'Target.createTarget', { url }, null)).targetId)
+  const trigger_closed = util.on_first(client, 'Target.targetDestroyed')
+  const trigger_tab = await call(client, 'Target.createTarget', { url: trigger }, null)
+  assert.equal((await trigger_closed).args[0].detail.targetId, trigger_tab.targetId)
   await evaluate('(async () => { for (let i = 0; i < 3; i++) await connect() })()')
   assert.equal(messages.length, 1, 'offline retries log one clear status message')
   assert.match(messages[0], /Waiting for CDP.js server.*retrying automatically/)
   assert.equal(websockets, 0, 'a closed port does not produce failing WebSocket handshakes')
   assert.deepEqual(errors, [], 'caught HTTP checks produce no worker console errors')
   assert.match(await read_sidebar("document.querySelector('#status').textContent.includes('Waiting for CDP.js')"), /offline-fixture/)
+  assert.match(await read_sidebar("document.querySelector('#commands').textContent.includes('closed tab')"), /cdp_ext.trigger/)
+  const trigger_history = await evaluate('debug_commands')
+  assert.equal(trigger_history.length, 1, 'duplicate tab updates record one trigger')
+  assert.equal(JSON.stringify(trigger_history).includes('secret-trigger-token'), false)
+  const remaining = (await call(client, 'Target.getTargets', {}, null)).targetInfos
+  assert.equal(unrelated_tabs.every(id => remaining.some(info => info.targetId === id)), true, 'other loopback pages and incomplete triggers stay open')
   await evaluate(`debug_commands.push({
     time: Date.now(),
     id: 42,
@@ -996,7 +1011,7 @@ test('extension waits for a trigger and retries an absent server without WebSock
     duration_ms: 12,
     error: 'Example failure'
   }); debug_update()`)
-  assert.match(await read_sidebar("document.querySelectorAll('#commands li').length === 1"), /Runtime.evaluate[\s\S]*12 ms[\s\S]*Example failure/)
+  assert.match(await read_sidebar("document.querySelectorAll('#commands li').length === 2"), /Runtime.evaluate[\s\S]*12 ms[\s\S]*Example failure/)
   await call(client, 'Emulation.setDeviceMetricsOverride', {
     width: 360,
     height: 760,
@@ -1011,7 +1026,7 @@ test('extension waits for a trigger and retries an absent server without WebSock
     expression: 'document.images.length',
   }, sidebar)).result.value, 0, 'command labels are rendered as text')
   await call(client, 'Page.reload', {}, sidebar)
-  await read_sidebar("document.querySelectorAll('#commands li').length === 1")
+  await read_sidebar("document.querySelectorAll('#commands li').length === 2")
   await call(client, 'Runtime.evaluate', {
     expression: 'document.querySelector("#clear").click()',
   }, sidebar)

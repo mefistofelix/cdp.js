@@ -1,6 +1,11 @@
 const port = chrome.runtime.connect({ name: 'cdp_debug' })
 const status = document.querySelector('#status')
 const heartbeat = setInterval(() => port.postMessage('ping'), 20000)
+if (location.search === '?connection') {
+  document.title = 'CDP.js connection'
+  document.querySelector('h1').textContent = document.title
+  document.querySelector('#connection-message').hidden = false
+}
 
 port.onMessage.addListener(state => {
   status.textContent = state.status
@@ -20,10 +25,14 @@ port.onMessage.addListener(state => {
     const details = document.createElement('small')
     details.textContent = [
       new Date(command.time).toLocaleTimeString(),
-      '#' + (command.id ?? 'notification'),
+      command.id == null ? (command.method === 'cdp_ext.trigger' ? 'trigger' : 'notification') : '#' + command.id,
       command.sessionId ? 'session ' + command.sessionId : 'browser',
       command.status,
       command.execution_mode,
+      command.tabId == null ? '' : 'tab ' + command.tabId,
+      command.browser,
+      command.endpoint,
+      command.action,
       command.duration_ms == null ? '' : command.duration_ms + ' ms',
     ].filter(Boolean).join(' · ')
     row.append(method, details)

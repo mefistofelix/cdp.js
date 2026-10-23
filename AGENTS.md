@@ -94,6 +94,16 @@ Coalesce concurrent checks and log waiting/connected status only on transitions.
 Expected offline fetch failures are handled; do not claim JavaScript handlers can
 suppress Chromium's native WebSocket console diagnostics during a check/upgrade race.
 Accept only loopback bootstrap URLs with a same-host/port WebSocket endpoint.
+Record accepted trigger activity in the existing bounded local debug history,
+with tab ID, browser label, endpoint and cleanup action, never the full URL/token.
+Recheck the live tab URL before processing and cleanup. Close only our valid
+trigger tabs after processing, including offline/conflicting triggers; preserve
+other loopback tabs and incomplete/nonmatching URLs. If the trigger is the only
+tab, navigate it to the existing sidebar.html?connection view to keep Chrome
+running without creating a replacement tab. That view shows a connection title,
+the logical browser and actual connected/waiting state; never claim a successful
+connection just because a trigger arrived. Reuse a trigger's diagnostic record
+across duplicate tab updates.
 `reverse: true` remains passive attachment by native `extension_id` or browser
 label and never opens a URL or writes profile files.
 
@@ -195,7 +205,7 @@ claim full browser CDP or Firefox compatibility.
 The toolbar action opens the native debug side panel. Its local runtime port
 receives a current snapshot and changes, with a heartbeat while open so the
 worker stays available before a trigger. It does not initiate a server connection.
-Keep only the last 50 command metadata records in worker memory: IDs, method,
+Keep only the last 50 command/trigger metadata records in worker memory: IDs, method,
 session, optional execution mode, status, duration and error. Exclude parameters,
 results and tokens. Display routing-session and debugger-root counts separately.
 Clear only empties this diagnostic history; closing the panel leaves CDP alone.
@@ -265,7 +275,8 @@ Node.js helpers. XPath/options are JSON-encoded into the invocation.
 - Never replay an application command after timeout/disconnect: its execution
   outcome may be unknown.
 - Creating a target must preserve initial blank tabs and other tabs. Do not add
-  startup-tab cleanup behavior.
+  startup-tab cleanup behavior. The explicitly requested validated bootstrap URL
+  cleanup above applies only to our trigger pages, not initial blank/user tabs.
 
 ## Defaults, overlap and error behavior
 
