@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CDP.js debug</title>
+<style>
+  :root { color-scheme: light dark; font: 14px system-ui, sans-serif; }
+  body { margin: 16px; }
+  header { display: flex; align-items: center; justify-content: space-between; }
+  h1 { font-size: 18px; margin: 0; }
+  h2 { font-size: 14px; margin: 24px 0 12px; }
+  button { font: inherit; cursor: pointer; padding: 5px 10px; }
+  #status { border-left: 3px solid #d99b24; padding-left: 10px; overflow-wrap: anywhere; }
+  #status.connected { border-color: #35a76a; }
+  dt { opacity: .65; margin-top: 12px; }
+  dd { margin: 3px 0; overflow-wrap: anywhere; font-family: monospace; }
+  #commands { padding: 0; list-style: none; }
+  li { border-top: 1px solid #8885; padding: 10px 0; }
+  strong { display: block; overflow-wrap: anywhere; font: 13px monospace; }
+  small { display: block; opacity: .7; margin-top: 5px; font-size: 12px; }
+  .error { color: light-dark(#b42318, #ff938a); white-space: pre-wrap; overflow-wrap: anywhere; }
+</style>
+<header><h1>CDP.js debug</h1><button id="clear" type="button" title="Clear command history">Clear</button></header>
+<p id="status" role="status">Connecting to extension…</p>
+<dl>
+  <dt>Browser</dt><dd id="browser">—</dd>
+  <dt>Server</dt><dd id="endpoint">—</dd>
+  <dt>Extension</dt><dd id="extension">—</dd>
+  <dt>Attached sessions</dt><dd id="sessions">0</dd>
+</dl>
+<h2>Recent commands <small>Latest 50 · memory only</small></h2>
+<p id="empty">No commands received.</p>
+<ol id="commands"></ol>
+<script src="sidebar.js"></script>
+</html>

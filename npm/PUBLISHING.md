@@ -5,7 +5,7 @@ The package is `@mefistofelix/cdp.js`. Its version and metadata live in
 original `cdp.js`, with the same named and default exports and no dependencies.
 
 Following [auto.js](https://github.com/mefistofelix/auto.js), publication copies
-`cdp.js`, the root README and the two `cdp_ext/` files into `npm/`, then publishes
+`cdp.js`, the root README and the four `cdp_ext/` files into `npm/`, then publishes
 that directory. The extension files allow managed reverse launches from npm.
 The copies are ignored by Git. There is no compilation, build script, or wrapper module.
 
@@ -35,6 +35,7 @@ Use Node.js 22.19 or later, npm, and an installed Chromium-family browser:
 ```sh
 node --check cdp.js
 node --check cdp_ext/cdp_ext.js
+node --check cdp_ext/sidebar.js
 node --test tests/cdp.test.js
 deno test -A tests/reverse.test.js
 bun test tests/cdp.test.js tests/reverse.test.js --timeout 60000
@@ -62,7 +63,8 @@ npm pack ./npm --dry-run
 ```
 
 The archive must contain exactly `package.json`, `cdp.js`, `README.md`,
-`cdp_ext/manifest.json`, and `cdp_ext/cdp_ext.js`.
+`cdp_ext/manifest.json`, `cdp_ext/cdp_ext.js`, `cdp_ext/sidebar.html`, and
+`cdp_ext/sidebar.js` (seven files total).
 The manifest's `files` allowlist includes the sources; npm includes the manifest
 and README automatically. Tests, profiles, tools, and local references stay out.
 Use `npm pack ./npm` to create a local archive if needed.
@@ -71,6 +73,8 @@ directory and exercise a managed `cdp_ext: true` launch under Deno and Bun from 
 installed entry point. The manager must find both packaged extension files and
 write its profile-specific copy automatically. Check the copied worker bytes and
 the source manifest and trigger's server URL; it must not depend on repository source paths.
+Confirm both sidebar assets are copied too and the manifest's `side_panel.default_path`
+points to the packaged HTML page.
 
 ## Authentication and trusted publisher
 

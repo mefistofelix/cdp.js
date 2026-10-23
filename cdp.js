@@ -658,8 +658,9 @@ export class cdp extends EventTarget {
           await fs.mkdir(record.extension_path, { recursive: true })
           record.extension_path = await fs.realpath(record.extension_path)
           record.extension_id = browser.extension_id(record.extension_path)
-          await fs.copyFile(new URL('./cdp_ext/manifest.json', import.meta.url), path.join(record.extension_path, 'manifest.json'))
-          await fs.copyFile(new URL('./cdp_ext/cdp_ext.js', import.meta.url), path.join(record.extension_path, 'cdp_ext.js'))
+          for (const filename of ['manifest.json', 'cdp_ext.js', 'sidebar.html', 'sidebar.js']) {
+            await fs.copyFile(new URL('./cdp_ext/' + filename, import.meta.url), path.join(record.extension_path, filename))
+          }
         }
         if (args['user-data-dir'] && record.update_preferences !== false) {
           await browser.update_profile_preferences(path.join(args['user-data-dir'], args['profile-directory'] || 'Default', 'Preferences'), {

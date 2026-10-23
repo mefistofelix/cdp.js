@@ -886,8 +886,8 @@ test('extension waits for a trigger and retries an absent server without WebSock
   await fs.mkdir(extension)
   const manifest = JSON.parse(await fs.readFile('cdp_ext/manifest.json', 'utf8'))
   manifest.cdp = { reconnect_ms: 10000 }
+  await fs.cp('cdp_ext', extension, { recursive: true })
   await fs.writeFile(path.join(extension, 'manifest.json'), JSON.stringify(manifest))
-  await fs.copyFile('cdp_ext/cdp_ext.js', path.join(extension, 'cdp_ext.js'))
   let requests = 0
   const server = createServer((request, response) => {
     requests++
@@ -936,6 +936,29 @@ test('extension waits for a trigger and retries an absent server without WebSock
     assert.equal(result.exceptionDetails, undefined)
     return result.result.value
   }
+  const sidebar = { name: 'debug-sidebar' }
+  await call(client, 'Page.navigate', {
+    url: 'chrome-extension://' + browser.extension_id(extension) + '/sidebar.html',
+  }, sidebar)
+  const read_sidebar = async condition => (await call(client, 'Runtime.evaluate', {
+    expression: `new Promise(resolve => {
+      const observer = new MutationObserver(check)
+      function check() {
+        if (!(${condition})) return
+        observer.disconnect()
+        resolve(document.body.innerText)
+      }
+      observer.observe(document, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+      })
+      check()
+    })`,
+    awaitPromise: true,
+    returnByValue: true,
+  }, sidebar)).result.value
+  assert.match(await read_sidebar("document.querySelector('#status')?.textContent === 'Waiting for trigger'"), /No commands received/)
   await evaluate('Promise.all([connect(), connect(), connect()])')
   assert.deepEqual(messages, [], 'no connection attempts or status noise before the trigger')
   assert.equal(websockets, 0)
@@ -950,6 +973,37 @@ test('extension waits for a trigger and retries an absent server without WebSock
   assert.match(messages[0], /Waiting for CDP.js server.*retrying automatically/)
   assert.equal(websockets, 0, 'a closed port does not produce failing WebSocket handshakes')
   assert.deepEqual(errors, [], 'caught HTTP checks produce no worker console errors')
+  assert.match(await read_sidebar("document.querySelector('#status').textContent.includes('Waiting for CDP.js')"), /offline-fixture/)
+  await evaluate(`debug_commands.push({
+    time: Date.now(),
+    id: 42,
+    method: 'Runtime.evaluate',
+    sessionId: '7',
+    status: 'error',
+    duration_ms: 12,
+    error: 'Example failure'
+  }); debug_update()`)
+  assert.match(await read_sidebar("document.querySelectorAll('#commands li').length === 1"), /Runtime.evaluate[\s\S]*12 ms[\s\S]*Example failure/)
+  await call(client, 'Emulation.setDeviceMetricsOverride', {
+    width: 360,
+    height: 760,
+    deviceScaleFactor: 1,
+    mobile: false,
+  }, sidebar)
+  const screenshot = await call(client, 'Page.captureScreenshot', {}, sidebar)
+  await fs.writeFile(path.resolve('build/sidebar-preview.png'), Buffer.from(screenshot.data, 'base64'))
+  await evaluate('debug_commands[0].method = "<img src=x>"; debug_update()')
+  await read_sidebar("document.querySelector('#commands').textContent.includes('<img src=x>')")
+  assert.equal((await call(client, 'Runtime.evaluate', {
+    expression: 'document.images.length',
+  }, sidebar)).result.value, 0, 'command labels are rendered as text')
+  await call(client, 'Page.reload', {}, sidebar)
+  await read_sidebar("document.querySelectorAll('#commands li').length === 1")
+  await call(client, 'Runtime.evaluate', {
+    expression: 'document.querySelector("#clear").click()',
+  }, sidebar)
+  await read_sidebar("document.querySelectorAll('#commands li').length === 0 && !document.querySelector('#empty').hidden")
+  assert.equal(await evaluate('debug_commands.length'), 0)
   server.listen(port, '127.0.0.1')
   await once(server, 'listening')
   await evaluate('Promise.all([connect(), connect(), connect()])')

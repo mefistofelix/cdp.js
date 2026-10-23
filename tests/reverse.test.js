@@ -27,10 +27,13 @@ test('reverse extension controls real Chrome without remote-debugging arguments'
   })
   const manifest = JSON.parse(await fs.readFile('cdp_ext/manifest.json', 'utf8'))
   manifest.cdp = { reconnect_ms: 200 }
+  await fs.cp('cdp_ext', extension, { recursive: true })
   await fs.writeFile(path.join(extension, 'manifest.json'), JSON.stringify(manifest))
-  await fs.copyFile('cdp_ext/cdp_ext.js', path.join(extension, 'cdp_ext.js'))
   await fs.appendFile(path.join(extension, 'cdp_ext.js'), `
 chrome.cdp_probe = {
+  debug_commands() {
+    return debug_commands
+  },
   execute_native(injection) {
     return chrome.scripting.executeScript(injection)
   },
@@ -161,6 +164,20 @@ chrome.cdp_probe = {
     assert.equal(targets.targetInfos.filter(info => info.type === 'page').length, 2, 'initial blank tab survives')
     const version = await call('Browser.getVersion', {}, null)
     assert.match(version.product, /Chrome/)
+    assert.deepEqual(await call('chrome.sidePanel.getPanelBehavior', {}, null), { openPanelOnActionClick: true })
+    assert.equal((await call('chrome.sidePanel.getOptions', { args: [{}] }, null)).path, 'sidebar.html')
+    await assert.rejects(call('Browser.debugFailure', {}, null), /Unsupported reverse browser command/)
+    const history = await call('chrome.cdp_probe.debug_commands', {}, null)
+    const failure = history.find(command => command.method === 'Browser.debugFailure')
+    assert.equal(failure.status, 'error')
+    assert.match(failure.error, /Unsupported reverse browser command/)
+    const evaluated = history.find(command => command.method === 'Runtime.evaluate')
+    assert.equal(evaluated.sessionId, oldSession)
+    assert.equal(evaluated.status, 'done')
+    assert.ok(evaluated.duration_ms >= 0)
+    assert.ok(history.every(command => !('params' in command) && !('result' in command) && !('token' in command)))
+    await Promise.all(Array.from({ length: 55 }, () => call('Browser.getVersion', {}, null)))
+    assert.equal((await call('chrome.cdp_probe.debug_commands', {}, null)).length, 50)
     assert.equal((await call('Runtime.evaluate', { expression: '43' }, {
       name: '__proto__',
       initialize: false,
@@ -520,8 +537,8 @@ chrome.cdp_probe = {
     assert.equal((await call('chrome.tabGroups.get', { args: [invalid_tab.groupId] }, null)).color, 'red')
     const other_extension = path.join(directory, 'other-extension')
     await fs.mkdir(other_extension)
+    await fs.cp('cdp_ext', other_extension, { recursive: true })
     await fs.writeFile(path.join(other_extension, 'manifest.json'), JSON.stringify(manifest))
-    await fs.copyFile('cdp_ext/cdp_ext.js', path.join(other_extension, 'cdp_ext.js'))
     const other_args = util.args_to_strings(browser.build_args({
       headless: true,
       user_data_dir: path.join(directory, 'other-profile'),
@@ -624,8 +641,8 @@ test('managed reverse launch uses extension identity and keeps a live process th
     const extension = path.join(spec.args['user-data-dir'], spec.args['profile-directory'], 'cdp_ext')
     await fs.mkdir(extension, { recursive: true })
     const manifest = JSON.parse(await fs.readFile('cdp_ext/manifest.json', 'utf8'))
+    await fs.cp('cdp_ext', extension, { recursive: true })
     await fs.writeFile(path.join(extension, 'manifest.json'), JSON.stringify(manifest))
-    await fs.copyFile('cdp_ext/cdp_ext.js', path.join(extension, 'cdp_ext.js'))
     const preparation = new cdp({
       headless: true,
       extensions: [extension],
@@ -828,8 +845,8 @@ test('URL bootstrap reuses normal Chrome and names profiles sharing one extensio
   await fs.mkdir(extension)
   const manifest = JSON.parse(await fs.readFile('cdp_ext/manifest.json', 'utf8'))
   manifest.cdp = { reconnect_ms: 200 }
+  await fs.cp('cdp_ext', extension, { recursive: true })
   await fs.writeFile(path.join(extension, 'manifest.json'), JSON.stringify(manifest))
-  await fs.copyFile('cdp_ext/cdp_ext.js', path.join(extension, 'cdp_ext.js'))
   await fs.appendFile(path.join(extension, 'cdp_ext.js'), `
 chrome.cdp_probe = {
   announce(url, message) {

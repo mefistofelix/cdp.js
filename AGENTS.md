@@ -12,7 +12,7 @@ Apply the user's current instructions to the task at hand.
 | `cdp.js` | Complete maintained implementation, an ES module importing only Node.js built-ins. |
 | `tests/cdp.test.js` | Node/Bun test-runner coverage with real headless Chromium. |
 | `tests/reverse.test.js` | Shared Deno/Bun coverage with the real extension and headless/normal Chrome; reverse execution uses no remote-debugging flags. Direct CDP prepares disposable user-script/incognito grant fixtures. |
-| `cdp_ext/` | Manifest V3 reverse transport: one Chrome worker and its configurable manifest. |
+| `cdp_ext/` | Manifest V3 reverse transport: one worker, manifest and minimal HTML/JS debug sidebar. |
 | `examples/reverse.mjs` | Native Deno/Bun server example. |
 | `tests/chat-monitoring.md` | Manual application traffic inspection and tool-session extraction recipe. |
 | `npm/package.json` | Publication metadata and version; no root package manifest. |
@@ -165,6 +165,17 @@ The extension uses a first-message announcement, an awake retry timer,
 empty-text heartbeats and a Chrome alarm for offline worker wakeup. Browser-level
 pausing of new root tabs is unsupported and must fail explicitly. Never silently
 claim full browser CDP or Firefox compatibility.
+
+The toolbar action opens the native debug side panel. Its local runtime port
+receives a current snapshot and changes, with a heartbeat while open so the
+worker stays available before a trigger. It does not initiate a server connection.
+Keep only the last 50 command metadata records in worker memory: IDs, method,
+session, status, duration and error. Exclude parameters, results and tokens.
+Clear only empties this diagnostic history; closing the panel leaves CDP alone.
+Closing/reloading a panel must not make a transport request fail if its port
+disconnects during a snapshot update. Render native strings with textContent.
+This explicitly requested local command history is not CDP event buffering or a
+new remote tracing/subscription API. Do not persist it or add UI dependencies.
 
 There is no Page abstraction. Browser and target records are plain data objects.
 Mappings are public objects, some with null prototypes. Custom handlers are
@@ -395,6 +406,7 @@ the task and preserve unrelated work. After a coherent implementation change:
 ```sh
 node --check cdp.js
 node --check cdp_ext/cdp_ext.js
+node --check cdp_ext/sidebar.js
 node --test tests/cdp.test.js
 deno test -A tests/reverse.test.js
 bun test tests/cdp.test.js tests/reverse.test.js --timeout 60000
@@ -430,8 +442,8 @@ this file for architecture/maintenance constraints.
 
 Keep npm metadata in `npm/`. Publishing copies `cdp.js`, `README.md` and `cdp_ext/`
 into that directory; those copies stay ignored. No build or setup script is needed.
-The tarball contains only `package.json`, `cdp.js`, `README.md`, and the two
-extension files required for managed reverse launches; source bytes and exports
+The tarball contains only `package.json`, `cdp.js`, `README.md`, and the four
+extension files (`manifest.json`, worker, sidebar HTML and script); source bytes and exports
 must match direct-file use. Follow `npm/PUBLISHING.md` for authentication and
 release steps. Packaging must not change repository visibility, add a license
 without a user decision, or include profiles, tests, private data, or tools.

@@ -7,6 +7,8 @@
 /cdp_ext/*
 !/cdp_ext/manifest.json
 !/cdp_ext/cdp_ext.js
+!/cdp_ext/sidebar.html
+!/cdp_ext/sidebar.js
 !/README.md
 !/TODO.md
 !/tests/

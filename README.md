@@ -24,7 +24,7 @@ import api, { util, jsrpc, browser, cdp } from '@mefistofelix/cdp.js'
 
 The npm package exports the same file and API. Direct file imports in the examples
 below remain supported. Publication metadata is isolated in `npm/`.
-The package includes both `cdp_ext/` files. With `cdp_ext: true`, the manager
+The package includes the worker, manifest and debug sidebar files. With `cdp_ext: true`, the manager
 prepares and loads the extension automatically with a custom user-data directory.
 The system profile uses an already installed extension by default. Reverse mode still
 requires Deno or Bun. In Deno, import from `npm:@mefistofelix/cdp.js`.
@@ -491,7 +491,7 @@ can configure its native incognito scope. See
 ## Reverse Chrome extension transport
 
 [cdp_ext/manifest.json](cdp_ext/manifest.json) and
-[cdp_ext/cdp_ext.js](cdp_ext/cdp_ext.js) form a Manifest V3 extension for Chrome
+[cdp_ext/cdp_ext.js](cdp_ext/cdp_ext.js), with the local debug sidebar, form a Manifest V3 extension for Chrome
 125+. The extension connects out to one WebSocket server. The server serves all
 browser instances on the same port; bootstrapped extensions announce the logical
 browser name and native extension ID. No remote-debugging argument is needed.
@@ -541,7 +541,7 @@ await client.call({
 
 Provide `user_data_dir` or raw `args['user-data-dir']` to choose a custom
 directory. An effective custom directory makes `cdp_ext_install` default to true:
-the manager copies the two extension files into
+the manager copies the four extension files into
 `<user-data-dir>/<profile-directory>/cdp_ext/` (`Default` when unset) and adds
 startup loading flags. The server address comes only from the trigger URL. Normal launch
 options and profile preferences then apply. Set `cdp_ext_install: false` to use
@@ -684,6 +684,28 @@ incompatible server causes one informational waiting message, not a failing
 WebSocket attempt on every timer tick. Successful connections and later
 disconnects log their status once per transition. Chrome can still emit a native
 network diagnostic if the server disappears between the HTTP check and upgrade.
+
+### Debug sidebar
+
+Click the extension's toolbar icon to open its native Chrome side panel.
+It shows the current connection status, logical browser name, WebSocket endpoint,
+native extension ID and number of attached root/child sessions. It works before
+the first trigger too, displaying **Waiting for trigger** without starting a
+server connection.
+
+The most recent 50 incoming commands appear newest first, with request ID,
+method, optional session ID, running/done/error status, elapsed milliseconds and
+error text. This is command metadata only: parameters, results and the trigger
+token are not included. Empty heartbeat messages and CDP events are not logged.
+**Clear** empties this history without cancelling commands or changing the
+connection. Reopening the panel retrieves the current snapshot; a worker restart
+or extension reload clears the history. No debug history is written to storage.
+
+The panel receives updates through a local extension port. While open, a
+20-second port heartbeat keeps the worker available, including before a trigger.
+Closing the panel does not disconnect CDP. After reloading the extension, reopen
+the panel if its old document reports that it has disconnected. The HTML and
+external script follow the normal extension CSP and require no build or dependency.
 
 ### Reverse protocol and supported commands
 
@@ -1787,11 +1809,12 @@ from tool-call history. It is a caller-side recipe, not additional library API.
 
 For npm packaging, account setup, and GitHub publishing, see
 [Publishing](npm/PUBLISHING.md). Publishing copies `cdp.js`, this README and the
-two `cdp_ext/` files into `npm/` alongside its manifest; no build script is needed.
+four `cdp_ext/` files into `npm/` alongside its manifest; no build script is needed.
 
 ```sh
 node --check cdp.js
 node --check cdp_ext/cdp_ext.js
+node --check cdp_ext/sidebar.js
 node --test tests/cdp.test.js
 deno test -A tests/reverse.test.js
 bun test tests/cdp.test.js tests/reverse.test.js --timeout 60000
@@ -1835,5 +1858,7 @@ combinations include default/custom directories, null/false raw directory
 overrides, forced installation and independent preference-write controls.
 Offline worker checks verify silence before a trigger, deduplicated waiting logs,
 no WebSocket attempts against absent/incompatible servers and concurrent retry checks.
-The npm tarball contains `package.json`, `cdp.js`, `README.md` and the two extension
-files required by managed reverse launches.
+The npm tarball contains `package.json`, `cdp.js`, `README.md` and the four extension
+files required by managed reverse launches and their debug sidebar. Tests cover
+live command metadata, its 50-entry limit, error/session details, sidebar rendering,
+safe text display, reopening and clearing through native extension messaging.

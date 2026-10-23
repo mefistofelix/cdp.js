@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "CDP reverse connection",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "minimum_chrome_version": "125",
   "permissions": [
     "accessibilityFeatures.read",
@@ -64,7 +64,12 @@
   "host_permissions": [
     "<all_urls>"
   ],
-  "action": {},
+  "action": {
+    "default_title": "CDP.js debug"
+  },
+  "side_panel": {
+    "default_path": "sidebar.html"
+  },
   "incognito": "spanning",
   "background": {
     "service_worker": "cdp_ext.js"

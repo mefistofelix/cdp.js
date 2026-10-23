@@ -12,11 +12,44 @@ let auto_attach = {}
 let bootstrapping
 let checking = false
 let connection_message
+const debug_commands = []
+const debug_ports = []
+
+function debug_update() {
+  const state = {
+    status: connection_message ?? (config.browser ? 'Connecting to server' : 'Waiting for trigger'),
+    connected: socket?.readyState === WebSocket.OPEN,
+    browser: config.browser ?? '',
+    endpoint: config.websocket_url ?? '',
+    extension_id: chrome.runtime.id,
+    sessions: Object.keys(sessions).length,
+    commands: debug_commands,
+  }
+  for (const port of debug_ports) {
+    try {
+      port.postMessage(state)
+    } catch {}
+  }
+}
+
+chrome.runtime.onConnect.addListener(port => {
+  if (port.name !== 'cdp_debug') return
+  debug_ports.push(port)
+  port.onDisconnect.addListener(() => debug_ports.splice(debug_ports.indexOf(port), 1))
+  port.onMessage.addListener(message => {
+    if (message !== 'clear') return
+    debug_commands.length = 0
+    debug_update()
+  })
+  configured.then(debug_update)
+})
+chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true })
 
 function report_connection(message) {
   if (connection_message === message) return
   connection_message = message
   console.info('[cdp_ext] ' + message)
+  debug_update()
 }
 
 async function bootstrap(tab) {
@@ -47,6 +80,8 @@ async function bootstrap(tab) {
     }
     if (changed) {
       Object.assign(config, settings)
+      connection_message = undefined
+      debug_update()
       await chrome.storage.session.set({ cdp_bootstrap: settings })
       if (socket && socket.readyState !== WebSocket.CLOSED) {
         await new Promise(resolve => {
@@ -91,6 +126,7 @@ function detached(source) {
       targetId: String(source.tabId),
     },
   })
+  debug_update()
 }
 
 async function attach_tab(tabId) {
@@ -206,6 +242,7 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
       sessionId: params.sessionId,
     }
     else delete sessions[params.sessionId]
+    debug_update()
   }
   send({
     method,
@@ -296,6 +333,16 @@ async function connect() {
     if (!event.data) return
     const request = JSON.parse(event.data)
     const { method, params = {}, sessionId, id } = request
+    const command = {
+      time: Date.now(),
+      id,
+      method,
+      sessionId,
+      status: 'running',
+    }
+    debug_commands.unshift(command)
+    debug_commands.length = Math.min(debug_commands.length, 50)
+    debug_update()
     let response
     try {
       let result
@@ -335,6 +382,10 @@ async function connect() {
         },
       }
     }
+    command.status = response.error ? 'error' : 'done'
+    command.error = response.error?.message
+    command.duration_ms = Date.now() - command.time
+    debug_update()
     if (id != null && connection.readyState === WebSocket.OPEN) connection.send(JSON.stringify(response))
   }
   connection.onclose = () => {
