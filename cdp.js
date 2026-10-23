@@ -320,7 +320,7 @@ const custom_methods = {
         if (i + 1 < options.attempts) await new Promise(resolve => setTimeout(resolve, options.interval_ms))
       }
       return false
-    }, options)
+    }, options, '_.click')
   },
   '_.find'(params) {
     const limit = params.limit ?? 20
@@ -346,7 +346,7 @@ const custom_methods = {
         count: nodes.snapshotLength,
         items,
       }
-    }, limit)
+    }, limit, '_.find')
   },
 }
 
@@ -472,20 +472,52 @@ export class cdp extends EventTarget {
     })
   }
 
-  evaluate_xpath(params, fn, options) {
+  async evaluate_xpath(params, fn, options, method) {
     if (params.target == null) throw new Error('Custom method requires target')
     const xpath = util.normalize_xpath(params.xpath)
-    return this.call({
+    const { record, entry } = await this._resolve(params)
+    const reverse = record.reverse || record.cdp_ext
+    const execution_mode = params.execution_mode ?? entry.execution_mode ?? 'api'
+    if (reverse && !['api', 'debugger'].includes(execution_mode)) throw new Error('execution_mode must be api or debugger')
+    if (reverse && execution_mode === 'api') {
+      if (method) return record.socket.req({
+        method,
+        params: {
+          xpath,
+          options,
+        },
+        sessionId: entry.sessionId,
+      })
+      const results = await record.socket.req({
+        method: 'chrome.scripting.executeScript',
+        params: {
+          args: [{
+            target: { tabId: Number(entry.targetId) },
+            world: 'MAIN',
+            func: 'async (...args) => ({ value: await (' + fn + ')(...args) })',
+            args: [xpath, options ?? null],
+          }],
+        },
+      })
+      const result = results[0]?.result
+      if (!result) throw new Error('Browser API evaluation failed; check page CSP and extension access. No debugger fallback was used.')
+      return {
+        result: {
+          type: typeof result.value,
+          value: result.value,
+        },
+      }
+    }
+    return record.socket.req({
       method: 'Runtime.evaluate',
       params: {
-        browser: params.browser,
-        target: params.target,
         expression: '(' + fn + ')(...' + JSON.stringify([xpath, options]) + ')',
         returnByValue: true,
         awaitPromise: true,
         silent: true,
         userGesture: true,
       },
+      sessionId: entry.sessionId,
     })
   }
 
@@ -513,7 +545,7 @@ export class cdp extends EventTarget {
     }
     const info = browser.target_info[targetId]
     if (message.method === 'Target.attachedToTarget') {
-      this._detach(browser, info?.sessionId)
+      if (info?.sessionId !== sessionId) this._detach(browser, info?.sessionId)
       info.sessionId = sessionId
       browser.session_targets[sessionId] = targetId
     }
@@ -777,6 +809,8 @@ export class cdp extends EventTarget {
   async _target(browser, target) {
     const socket = browser.socket
     const reverse = browser.reverse || browser.cdp_ext
+    const execution_mode = target.execution_mode ?? 'api'
+    if (reverse && !['api', 'debugger'].includes(execution_mode)) throw new Error('execution_mode must be api or debugger')
     if (target.group != null && target.group !== false) {
       const spec = typeof target.group === 'string' ? { name: target.group } : target.group
       browser.groups[spec.name] ??= {
@@ -819,17 +853,23 @@ export class cdp extends EventTarget {
       if (!info.incognito) throw new Error('Existing target is not incognito')
     }
     if (target.group != null && target.group !== false) info.groupId = await this._group(browser, target)
-    if (!info.sessionId) {
+    if (!info.sessionId || (reverse && execution_mode === 'debugger')) {
       info.sessionId = (await socket.req({
         method: 'Target.attachToTarget',
         params: {
           targetId: target.targetId,
           flatten: true,
+          ...(reverse ? { execution_mode } : {}),
         },
       })).sessionId
       browser.session_targets[info.sessionId] = target.targetId
     }
     const sessionId = info.sessionId
+    target.setup_errors = []
+    if (reverse && execution_mode === 'api') {
+      target.sessionId = sessionId
+      return
+    }
     const steps = []
     if (target.initialize !== false) {
       for (const [option, domain] of Object.entries({
@@ -853,7 +893,6 @@ export class cdp extends EventTarget {
       if ((target.runtime ?? 'bootstrap') === 'bootstrap') steps.push(['Runtime.disable'])
     }
     steps.push(['Runtime.runIfWaitingForDebugger'])
-    target.setup_errors = []
     for (const [method, params] of steps) {
       try {
         await socket.req({
@@ -869,13 +908,7 @@ export class cdp extends EventTarget {
     target.sessionId = sessionId
   }
 
-  async call({ method, params = {} }) {
-    if (method.startsWith('_.')) {
-      const handler = this.custom_methods[method]
-      if (!handler) throw new Error('Unknown CDP extension: ' + method)
-      return handler.call(this, params)
-    }
-    const { browser = 'main', target, ...native } = params
+  async _resolve({ browser = 'main', target }) {
     const spec = typeof browser === 'string' ? { name: browser } : browser
     const record = this.browsers[spec.name] ??= {
       user_data_dir: ((spec.reverse ?? this.options.reverse) || (spec.cdp_ext ?? this.options.cdp_ext)) ? null : path.join(this.base_path, spec.name),
@@ -933,6 +966,20 @@ export class cdp extends EventTarget {
         await entry.connecting
       }
     }
+    return {
+      record,
+      entry,
+    }
+  }
+
+  async call({ method, params = {} }) {
+    if (method.startsWith('_.')) {
+      const handler = this.custom_methods[method]
+      if (!handler) throw new Error('Unknown CDP extension: ' + method)
+      return handler.call(this, params)
+    }
+    const { browser, target, execution_mode, ...native } = params
+    const { record, entry } = await this._resolve(params)
     if (method === 'Target.disposeBrowserContext' && target == null) {
       const context = Object.values(record.contexts).find(value => value.browserContextId === native.browserContextId)
       if (context) return this._dispose_context(record, context, native)

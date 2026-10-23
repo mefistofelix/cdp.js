@@ -8,6 +8,112 @@ import { browser, cdp, util } from '../cdp.js'
 
 const test = globalThis.Deno ? Deno.test : (await import('bun:test')).test
 
+test('reverse targets and XPath default to browser APIs, with explicit debugger execution', async () => {
+  await fs.mkdir(path.resolve('build/tests'), { recursive: true })
+  const directory = await fs.mkdtemp(path.resolve('build/tests/execution-mode-'))
+  const page_server = createServer((request, response) => {
+    response.writeHead(200, {
+      'content-type': 'text/html',
+      ...(request.url === '/csp' ? { 'content-security-policy': "script-src 'none'" } : {}),
+    })
+    response.end('<h1>API test</h1><button>Click</button><input id="value" value="before"><details><summary>Toggle</summary></details>')
+  })
+  page_server.listen(0, '127.0.0.1')
+  await once(page_server, 'listening')
+  const client = new cdp({
+    base_path: directory,
+    cdp_ext: true,
+    user_data_dir: path.join(directory, 'profile'),
+    headless: true,
+    reverse_server: { port: 0 },
+    connect_timeout_ms: 20000,
+  })
+  const call = (method, params = {}, target = 'api') => client.call({
+    method,
+    params: { ...params, target },
+  })
+  try {
+    await call('chrome.tabs.query', { args: [{}] }, Object.freeze({
+      name: 'api',
+      group: { name: 'API tabs', color: 'green' },
+      create_params: { url: 'http://127.0.0.1:' + page_server.address().port + '/csp' },
+    }))
+    const record = client.browsers.main
+    const entry = record.targets.api
+    const tabId = Number(entry.targetId)
+    const is_attached = async () => (await call('chrome.debugger.getTargets', {}, null)).find(target => target.tabId === tabId).attached
+    for (let i = 0; i < 100; i++) {
+      if ((await call('chrome.tabs.get', { args: [tabId] })).status === 'complete') break
+      await new Promise(resolve => setTimeout(resolve, 30))
+    }
+    assert.equal(entry.sessionId, entry.targetId)
+    assert.deepEqual(entry.setup_errors, [])
+    assert.equal(await is_attached(), false, 'selection, creation and grouping do not attach a debugger')
+    assert.equal((await call('_.find', { xpath: '//h1' })).result.value.items[0].text, 'API test')
+    assert.equal((await call('_.click', { xpath: '//button' })).result.value, true)
+    assert.equal((await call('_.click', { xpath: '//summary' })).result.value, true)
+    assert.equal((await call('_.find', { xpath: '//details[@open]' })).result.value.count, 1, 'native DOM click changes page state under CSP')
+    assert.equal((await call('_.click', { xpath: '//missing', attempts: 1 })).result.value, false)
+    assert.equal((await call('_.find', { xpath: '//*[@id="value"]' })).result.value.items[0].value, 'before')
+    assert.equal(await is_attached(), false, 'fixed XPath functions work under CSP without debugger or eval')
+    const disconnected = util.on_first(client, 'close')
+    record.socket.close()
+    await disconnected
+    assert.equal((await call('_.find', { xpath: '//h1' })).result.value.count, 1)
+    assert.equal(await is_attached(), false, 'API routing reconnects without debugger attachment')
+    await assert.rejects(client.evaluate_xpath({ target: 'api', xpath: '//h1' }, xpath => xpath), /Browser API evaluation failed/)
+    assert.equal(await is_attached(), false, 'arbitrary API code has no debugger fallback')
+    await assert.rejects(call('_.find', { xpath: '//h1', execution_mode: 'invalid' }), /execution_mode/)
+    let attachments = 0
+    client.addEventListener('Target.attachedToTarget', event => {
+      if (event.detail.targetInfo.targetId === entry.targetId) attachments++
+    })
+    const results = await Promise.all([
+      call('Runtime.evaluate', { expression: '21 * 2' }),
+      call('Runtime.evaluate', { expression: 'typeof _send_to_cdp' }),
+    ])
+    assert.equal(results[0].result.value, 42)
+    assert.equal(results[1].result.value, 'undefined', 'explicit CDP does not enable optional target setup')
+    assert.equal(attachments, 1, 'concurrent explicit CDP commands share debugger attachment')
+    assert.equal(entry.sessionId, entry.targetId, 'lazy attachment preserves logical target readiness')
+    assert.equal(await is_attached(), true)
+    await call('Target.detachFromTarget', { sessionId: entry.sessionId }, null)
+    assert.equal((await call('_.find', { xpath: '//h1' })).result.value.count, 1)
+    assert.equal(await is_attached(), false, 'API target selection stays API after explicit detach')
+    const api_found = await call('_.find', { xpath: '//h1' })
+    const debugger_found = await call('_.find', { xpath: '//h1', execution_mode: 'debugger' })
+    assert.deepEqual(debugger_found.result.value, api_found.result.value, 'both modes return the same node data')
+    assert.equal(await is_attached(), true, 'per-call mode selects debugger without changing target configuration')
+    assert.equal(entry.execution_mode, undefined)
+    await assert.rejects(record.socket.req({ method: 'Runtime.evaluate', params: { expression: '42' }, sessionId: 'missing' }), /Unknown debugger session/)
+    await call('chrome.tabs.query', { args: [{}] }, {
+      name: 'debug',
+      execution_mode: 'debugger',
+      runtime: true,
+    })
+    assert.equal((await call('Runtime.evaluate', { expression: 'typeof _send_to_cdp' }, 'debug')).result.value, 'function')
+    await call('chrome.tabs.query', { args: [{}] }, {
+      name: 'no-setup',
+      execution_mode: 'debugger',
+      initialize: false,
+    })
+    assert.equal((await call('Runtime.evaluate', { expression: 'typeof _send_to_cdp' }, 'no-setup')).result.value, 'undefined')
+    await call('chrome.tabs.update', { args: [tabId, { url: 'http://127.0.0.1:' + page_server.address().port }] }, null)
+    for (let i = 0; i < 100; i++) {
+      if ((await call('chrome.tabs.get', { args: [tabId] })).status === 'complete') break
+      await new Promise(resolve => setTimeout(resolve, 30))
+    }
+    assert.equal((await client.evaluate_xpath({ target: 'api', xpath: '//h1' }, xpath => document.evaluate(xpath, document, null, 9, null).singleNodeValue.textContent)).result.value, 'API test')
+  } finally {
+    const proc = client.browsers.main?.proc
+    const exited = proc?.exitCode === null ? once(proc, 'exit') : null
+    await client.close()
+    await exited
+    page_server.closeAllConnections()
+    await new Promise(resolve => page_server.close(resolve))
+  }
+})
+
 test('reverse extension controls real Chrome without remote-debugging arguments', async () => {
   const build = path.resolve('build/tests')
   await fs.mkdir(build, { recursive: true })
@@ -116,6 +222,7 @@ chrome.cdp_probe = {
     const [first, second] = await Promise.all([
       call('Runtime.evaluate', { expression: '21 * 2' }, {
         name: 'page',
+        execution_mode: 'debugger',
         runtime: true,
       }),
       call('Runtime.evaluate', { expression: '3 + 4' }),
@@ -634,7 +741,10 @@ test('managed reverse launch uses extension identity and keeps a live process th
       method: 'Runtime.evaluate',
       params: {
         browser: spec,
-        target: 'page',
+        target: {
+          name: 'page',
+          execution_mode: 'debugger',
+        },
         expression: '42',
       },
     })

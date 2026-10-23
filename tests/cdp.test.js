@@ -902,9 +902,22 @@ test('extension waits for a trigger and retries an absent server without WebSock
     if (server.listening) await new Promise(resolve => server.close(resolve))
   })
   const client = await fixture(t, { extensions: [extension] })
-  await call(client, 'Browser.getVersion', {}, null)
-  const { targetInfos } = await call(client, 'Target.getTargets', {}, null)
-  const worker = targetInfos.find(info => info.type === 'service_worker' && info.url.endsWith('/cdp_ext.js'))
+  const worker_ready = util.on_first(client, 'test_extension_ready')
+  const observe_worker = event => {
+    const info = event.detail.targetInfo
+    if (info.type === 'service_worker' && info.url.endsWith('/cdp_ext.js')) util.emit(client, 'test_extension_ready', info)
+  }
+  client.addEventListener('Target.targetCreated', observe_worker)
+  let worker
+  try {
+    await call(client, 'Browser.getVersion', {}, null)
+    const { targetInfos } = await call(client, 'Target.getTargets', {}, null)
+    worker = targetInfos.find(info => info.type === 'service_worker' && info.url.endsWith('/cdp_ext.js'))
+    if (worker) util.emit(client, 'test_extension_ready', worker)
+    worker = (await worker_ready).args[0].detail
+  } finally {
+    client.removeEventListener('Target.targetCreated', observe_worker)
+  }
   assert.ok(worker, 'the extension loads before a trigger exists')
   const target = {
     name: 'extension-worker',

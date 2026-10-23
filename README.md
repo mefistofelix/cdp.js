@@ -43,6 +43,8 @@ In Bun, use `bun add @mefistofelix/cdp.js` and the ordinary package import above
   without browser remote-debugging arguments.
 - Generic `chrome.x.y` extension API calls on that connection, including scripting,
   tabs/windows, cookies, storage, downloads and browser settings.
+- Reverse target management and XPath helpers default to browser APIs, with
+  optional debugger execution; explicit native CDP commands still execute.
 - Shared initialization for concurrent calls; reconnection and target recreation
   on subsequent use, without replaying failed commands.
 - Public object mappings and directly replaceable custom method handlers.
@@ -119,7 +121,7 @@ import api, { util, jsrpc, browser, cdp } from './cdp.js'
 | --- | --- |
 | `new cdp(options = {})` | Create a manager; does not launch a browser yet. |
 | `client.call({ method, params = {} })` | Resolve routing and return a promise for the native CDP result, or a custom handler's result. |
-| `client.evaluate_xpath(params, fn, options)` | Execute a serialized function with a normalized XPath in a target; return the native `Runtime.evaluate` result. |
+| `client.evaluate_xpath(params, fn, options)` | Execute a serialized function with a normalized XPath. Direct/debugger mode returns native `Runtime.evaluate` data; reverse API mode returns `{ result: { type, value } }`. |
 | `client.close()` | Close owned processes, disconnect attached/reverse browsers, stop the reverse server and clear browser/socket mappings. Profiles and external browsers remain. |
 | `new jsrpc(urlOrSocket, options = {})` | Open a raw WebSocket JSON-RPC connection or equip an accepted socket with the same RPC methods. |
 | `client.listen_reverse(options = {})` | Start the native Deno or Bun WebSocket server; returns that server with common lifecycle fields documented below. |
@@ -648,8 +650,9 @@ native send/close and live ready state. The same `jsrpc` handles both runtimes;
 registration, request IDs, pending waits, events and session routing are shared.
 Native Bun WebSocket limits still apply.
 
-Reverse calls reuse the normal target setup, custom handlers, mappings, routed
-events, request correlation, timeout and error behavior. `reverse: true` alone
+Reverse calls share target selection, custom handlers, mappings, routed events,
+request correlation, timeout and error behavior. Implicit CDP setup is opt-in
+through `target.execution_mode: 'debugger'`. `reverse: true` alone
 attaches externally: the manager neither launches nor updates that browser.
 `cdp_ext_install: true` owns the launched process and applies normal launch preferences.
 With installation off, Chrome is external and remains open on manager close.
@@ -688,13 +691,23 @@ network diagnostic if the server disappears between the HTTP check and upgrade.
 ### Debug sidebar
 
 Click the extension's toolbar icon to open its native Chrome side panel.
+If the icon is hidden, open Chrome's Extensions menu (the puzzle piece), find
+**CDP reverse connection**, and pin it or click its entry. The panel opens on a
+user action; loading the extension or connecting a browser does not open it.
+After updating the package, an already running Chrome still has its previously
+loaded extension: reload it in `chrome://extensions` after updating its directory,
+or restart that custom-profile browser through a fresh manager. For a manually
+installed extension, update its installed files too. Reopening an old side panel
+alone does not upgrade the worker.
+
 It shows the current connection status, logical browser name, WebSocket endpoint,
-native extension ID and number of attached root/child sessions. It works before
+native extension ID, number of routing sessions and number of debugger-attached
+root tabs. A routing session does not imply debugger attachment. It works before
 the first trigger too, displaying **Waiting for trigger** without starting a
 server connection.
 
 The most recent 50 incoming commands appear newest first, with request ID,
-method, optional session ID, running/done/error status, elapsed milliseconds and
+method, optional session ID/execution mode, running/done/error status, elapsed milliseconds and
 error text. This is command metadata only: parameters, results and the trigger
 token are not included. Empty heartbeat messages and CDP events are not logged.
 **Clear** empties this history without cancelling commands or changing the
@@ -736,8 +749,10 @@ Worker and out-of-process iframe commands still use real flattened CDP sessions.
 Their native session IDs pass through unchanged, without prefixes. The extension
 uses one `sessions` object for both roots and children: a tab ID maps to `{ tabId }`,
 and a native child session ID maps to `{ tabId, sessionId }`. Every target command
-looks up that object and passes the debuggee directly to `chrome.debugger.sendCommand`;
-there is no fallback that interprets unknown session IDs as tab IDs.
+looks up that object. API-mode root selection only registers the routing reference;
+an explicit session CDP command attaches its root lazily, sharing concurrent
+attachment, then calls `chrome.debugger.sendCommand`. There is no fallback that
+interprets unknown session IDs as tab IDs.
 Explicit detach takes `params.sessionId` for either a tab or child
 session. Logical target labels remain inside the manager. Reconnecting invalidates
 attachment/setup state even though a surviving root tab's routing ID stays the same.
@@ -752,12 +767,13 @@ tab and focuses its window. `Browser.getVersion` returns product/user-agent data
 its protocol version is `1.3`, with empty `revision` and `jsVersion` fields.
 Other browser-level commands return explicit unsupported-command errors.
 
-Target/session commands go through
+Explicit native target/session CDP commands go through
 [chrome.debugger](https://developer.chrome.com/docs/extensions/reference/api/debugger),
 which supports a restricted set of CDP domains. Runtime, Page, Network, DOM,
 Input and Emulation are available; ServiceWorker and BackgroundService are not.
-Their default setup attempts therefore appear in `target.setup_errors`; disable
-those setup flags if desired. Chrome restrictions, policies and debugger detach
+Their setup attempts in debugger target mode therefore appear in
+`target.setup_errors`; disable those setup flags if desired. API targets skip
+that setup. Chrome restrictions, policies and debugger detach
 events remain visible. Opening DevTools on an attached tab can detach this debugger.
 Firefox/Camoufox support remains planned.
 
@@ -1335,7 +1351,8 @@ await client.call({
 | `incognito` | `false` | Create/select a private target; direct mode uses the shared `'incognito'` context by default, reverse uses a native incognito window with the user's extension grant. |
 | `group` | unset | Reverse-only tab group name or first-use `{ name, color }` configuration. False skips grouping. |
 | `create_params` | `{}` | Native creation overrides, merged over `url: 'about:blank'` and `background: true`; start from a blank target without requesting foreground activation. |
-| `initialize` | `true` | Run the convenience setup sequence; false skips it. |
+| `execution_mode` | `'api'` in reverse | Reverse-only choice for implicit target setup and built-in XPath helpers: `'api'` uses extension APIs; `'debugger'` attaches and runs CDP setup. Direct CDP ignores it. |
+| `initialize` | `true` | Run the convenience CDP setup sequence in direct/debugger mode; false skips it. API mode skips that sequence regardless. |
 | `runtime` | `'bootstrap'` | Enable Runtime for setup, then disable reporting. `true` leaves it enabled; `false` skips both operations. |
 | `page` | `true` | Enable Page domain reporting for navigation/page operations and events. |
 | `network` | `true` | Enable Network reporting so native network events are available. |
@@ -1343,6 +1360,102 @@ await client.call({
 | `focus_emulation` | `true` | Request target focus emulation, including when the actual window is not focused. |
 | `binding` | `'_send_to_cdp'` | Default page-to-host JavaScript binding. String changes its name; false skips installation; true selects the default name. |
 | `background_service` | `true` | Clear, observe and record `pushMessaging` background-service events in Chromium. |
+
+### Reverse execution mode
+
+In extension mode (`cdp_ext: true` or passive `reverse: true`), a target defaults
+to `execution_mode: 'api'`. Creating/selecting it, grouping it and running
+`_.find`/`_.click` do not attach the debugger. Root tabs are created through
+`chrome.tabs`/`chrome.windows`; choosing debugger mode then attaches the selected
+tab before setup. Chrome's debugger API needs an existing debuggee.
+
+| Operation | Reverse API target (default) | Reverse debugger target |
+| --- | --- | --- |
+| Target selection and root routing | Register the stable tab ID without debugger attachment. | Attach the selected tab and register the same routing ID. |
+| Implicit initialization | No Runtime/Page/Network enabling, binding, focus emulation, background-service setup or resume command. | Apply the documented initialization options and resume after setup. |
+| `_.find`, `_.click` | Fixed native `chrome.scripting.executeScript` functions in the isolated world; shared DOM, no string evaluation. | `Runtime.evaluate` in the page world. |
+| Explicit session CDP, such as `Runtime.evaluate` or `Page.navigate` | Attach lazily and execute the exact CDP request. | Execute the CDP request. |
+| Explicit `chrome.*` method | Invoke the named native extension API with the supplied positional arguments. | Same native extension API dispatch. |
+
+The target option is recorded on first use of its logical name, like the other
+target options. It belongs in `params.target`, not constructor/browser defaults.
+`runtime: true`, `network: true` or a binding name alone do not opt an API target
+into debugger setup. To retain the previous reverse convenience initialization,
+set `target.execution_mode: 'debugger'` explicitly. Direct CDP defaults are unchanged.
+As with the existing XPath helper, `_.find` does not wait for navigation or retry;
+wait for your page's readiness before querying it.
+
+```js
+const found = await client.call({
+  method: '_.find',
+  params: {
+    browser: {
+      name: 'work',
+      cdp_ext: true,
+    },
+    target: {
+      name: 'search',
+      create_params: {
+        url: 'https://example.com/',
+      },
+    },
+    xpath: '//h1',
+  },
+})
+console.log(found.result.value)
+
+// Select debugger execution for this helper call only.
+await client.call({
+  method: '_.click',
+  params: {
+    browser: 'work',
+    target: 'search',
+    execution_mode: 'debugger',
+    xpath: '//button',
+  },
+})
+
+// Native CDP executes even though the target's default remains API mode.
+await client.call({
+  method: 'Runtime.evaluate',
+  params: {
+    browser: 'work',
+    target: 'search',
+    expression: 'document.title',
+  },
+})
+
+// A separate target with the full convenience debugger setup.
+await client.call({
+  method: 'Page.navigate',
+  params: {
+    browser: 'work',
+    target: {
+      name: 'instrumented',
+      execution_mode: 'debugger',
+      runtime: true,
+    },
+    url: 'https://example.com/',
+  },
+})
+```
+
+For the built-in helpers and `evaluate_xpath`, `params.execution_mode` overrides
+the target's choice for that call only; it does not enable optional target setup
+or change the recorded configuration. Valid reverse values are `'api'` and
+`'debugger'`. Native CDP and `chrome.*` methods keep their explicit dispatch and
+ignore this helper override; the router removes it from native parameters.
+Custom handlers still receive the original parameters and choose their own behavior.
+
+API selection does not detach a debugger previously attached by an explicit
+command. Use `Target.detachFromTarget` explicitly if needed. After detachment,
+an API target can be selected and used through API helpers again without
+reattachment. Native CDP attachment by itself does not enable domains or install
+bindings; send the desired commands explicitly or choose debugger target setup.
+Only debugger-attached targets expose flattened worker/iframe sessions. Browser
+API helpers operate on the registered root tab's main frame; extension permissions
+and Chrome's restricted-page rules still apply. There is no automatic fallback
+from API execution to debugger execution.
 
 ### Named tab groups
 
@@ -1416,6 +1529,10 @@ and [grouping tabs](https://developer.chrome.com/docs/extensions/reference/api/t
 
 ### Target initialization
 
+The following CDP setup applies to direct mode and reverse targets configured
+with `execution_mode: 'debugger'`. Reverse API targets skip it entirely, including
+`Runtime.runIfWaitingForDebugger`; `initialize: false` does not opt into debugging.
+
 Domain options set to false skip setup commands; they do not actively disable a
 domain already enabled by another caller. Likewise, `binding: false` does not
 remove a previously installed binding. Use native CDP commands for immediate
@@ -1488,10 +1605,16 @@ await loaded
 ## XPath custom methods
 
 Both built-ins require `params.target`; `params.browser` defaults to `main`
-through the normal router. They use `Runtime.evaluate` with `returnByValue`,
+through the normal router. In direct/debugger execution they use `Runtime.evaluate` with `returnByValue`,
 `awaitPromise`, `silent` and `userGesture` set to true: serialize the result,
 await async page code, suppress evaluation exception reporting, and evaluate
-with a user gesture respectively.
+with a user gesture respectively. In reverse API execution, fixed native scripting
+functions perform the same DOM operations in the isolated world, without eval,
+user-script permission or CSP changes. They keep `response.result.value` and the
+same click/find value shapes. API results contain `result.type` and `result.value`;
+they do not manufacture CDP remote-object metadata or `exceptionDetails`.
+Native injection errors reject; failed script execution also rejects. Debugger
+evaluation retains native `exceptionDetails` for page-side exceptions.
 
 | Method | Parameters | Remote result in `response.result.value` |
 | --- | --- | --- |
@@ -1536,10 +1659,19 @@ const text = await client.evaluate_xpath({
 console.log(text.result.value)
 ```
 
-`params` supplies `browser`, `target` and `xpath`. `fn` is serialized and called in
+`params` supplies `browser`, `target`, `xpath` and optional per-call
+`execution_mode`. `fn` is serialized and called in
 the target as `fn(normalizedXPath, options)`; it cannot capture Node.js variables
 or imported helpers. `options` must be JSON-serializable; omission becomes null
-in the argument array. Results retain native `exceptionDetails` if page code throws.
+in the argument array. Direct/debugger results retain native `exceptionDetails`
+if page code throws. In reverse API mode this arbitrary-function helper uses the
+existing string-function scripting adapter in the **MAIN** world and returns
+`{ result: { type, value } }`. Unlike the two fixed built-ins, arbitrary source
+evaluation requires the page CSP to allow eval. Injection errors or missing
+execution results reject; no debugger, CSP bypass or user-script toggle is enabled
+automatically. Choose `execution_mode: 'debugger'` explicitly when native CDP
+evaluation is required. Native `chrome.scripting.executeScript` calls retain their
+existing native world default and native result array.
 
 ### Register, replace or remove handlers
 
@@ -1645,6 +1777,7 @@ await client.call({
   params: {
     target: {
       name: 'bridge',
+      execution_mode: 'debugger',
       binding: 'send_to_host',
       runtime: true,
     },

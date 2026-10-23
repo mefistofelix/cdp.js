@@ -129,7 +129,33 @@ is alive. Wait for extension reconnection, and allow relaunch only after confirm
 child-process exit. Concurrent calls share the same initialization promise.
 
 `cdp_ext` translates only the documented browser-level command subset through
-Chrome tabs/debugger APIs; session commands use native `chrome.debugger`.
+Chrome tabs/debugger APIs. Reverse targets default to `execution_mode: 'api'`:
+implicit root selection registers `{ tabId }` without debugger attachment and
+skips all optional CDP setup and the resume command. Root creation uses native
+tabs/windows APIs, which provide the existing debuggee needed for attachment.
+`target.execution_mode: 'debugger'` attaches the selected tab and runs the existing
+setup sequence. Constructor/browser options are not target defaults. Direct CDP
+ignores this reverse-only setting. An explicit session CDP command always executes:
+attach its registered root lazily, sharing the existing attachment promise, then
+send the command. Lazy attachment does not opt into optional setup. Unknown
+sessions still reject; never interpret an unknown ID as a tab ID. A repeated
+attachment event with the same routing ID must preserve the target's readiness.
+
+`_.find` and `_.click` use fixed native scripting functions in the isolated world
+in API mode; they need no eval, CSP bypass or user-script grant. The browser-side
+implementations in the worker and direct serialized functions must keep their
+XPath/options/result semantics aligned; integration tests compare their values
+and exercise actual DOM changes under restrictive CSP. `evaluate_xpath` with an
+arbitrary function uses the existing string scripting adapter in MAIN in API mode,
+so page CSP applies. Missing execution results reject, without debugger fallback.
+API helpers return `{ result: { type, value } }`; direct/debugger evaluation keeps
+native CDP data and exceptionDetails. `params.execution_mode` overrides execution
+for one built-in/helper call without modifying target configuration or triggering
+optional setup. Remove this routing field from native request parameters. Generic
+custom handlers still receive original params. An API call does not detach an
+already attached debugger. Explicit detach and reconnect clear routing state;
+API reselection must not attach the debugger again.
+
 Names beginning with `chrome.` invoke extension APIs through the same RPC transport,
 before CDP session dispatch. Resolve nested owners generically and preserve the
 receiver; `params.args` holds native positional arguments, including native target
@@ -170,7 +196,8 @@ The toolbar action opens the native debug side panel. Its local runtime port
 receives a current snapshot and changes, with a heartbeat while open so the
 worker stays available before a trigger. It does not initiate a server connection.
 Keep only the last 50 command metadata records in worker memory: IDs, method,
-session, status, duration and error. Exclude parameters, results and tokens.
+session, optional execution mode, status, duration and error. Exclude parameters,
+results and tokens. Display routing-session and debugger-root counts separately.
 Clear only empties this diagnostic history; closing the panel leaves CDP alone.
 Closing/reloading a panel must not make a transport request fail if its port
 disconnects during a snapshot update. Render native strings with textContent.
@@ -187,7 +214,7 @@ access model; do not add registration methods, trivial accessors or Maps.
 1. `cdp.call({ method, params })` dispatches `_.` names before launching or
    resolving anything. The handler receives the original `params` and has the
    `cdp` instance as `this`.
-2. For native methods, remove `browser` and `target` from a copy of `params`.
+2. For native methods, remove `browser`, `target` and `execution_mode` from a copy of `params`.
    The input object must remain usable even when frozen.
 3. Create a browser record on first use. Merge constructor browser defaults and
    the per-browser spec; `args`, `preferences` and `local_state` each get a
@@ -196,7 +223,9 @@ access model; do not add registration methods, trivial accessors or Maps.
    process, opens `jsrpc`, enables flattened auto-attachment and target discovery.
    Concurrent calls share
    `record.connecting`.
-5. `_target` creates/reuses a physical target, attaches if needed, then runs setup.
+5. `_resolve` shares browser/target resolution between native calls and XPath
+   helpers. `_target` creates/reuses a physical target, registers reverse API
+   routing or attaches for direct/debugger execution, then runs applicable setup.
    Calls share `entry.connecting`; the target's usable `sessionId` is assigned
    after setup completes.
 6. `jsrpc.req` sends native parameters and top-level `sessionId`, returning the

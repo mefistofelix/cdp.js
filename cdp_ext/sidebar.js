@@ -10,6 +10,7 @@ port.onMessage.addListener(state => {
     endpoint: state.endpoint,
     extension: state.extension_id,
     sessions: state.sessions,
+    debugger_tabs: state.debugger_tabs ?? 0,
   })) document.getElementById(id).textContent = value === '' ? '—' : value
   document.querySelector('#empty').hidden = state.commands.length > 0
   document.querySelector('#commands').replaceChildren(...state.commands.map(command => {
@@ -22,6 +23,7 @@ port.onMessage.addListener(state => {
       '#' + (command.id ?? 'notification'),
       command.sessionId ? 'session ' + command.sessionId : 'browser',
       command.status,
+      command.execution_mode,
       command.duration_ms == null ? '' : command.duration_ms + ' ms',
     ].filter(Boolean).join(' · ')
     row.append(method, details)

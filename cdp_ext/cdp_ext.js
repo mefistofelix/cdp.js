@@ -23,6 +23,7 @@ function debug_update() {
     endpoint: config.websocket_url ?? '',
     extension_id: chrome.runtime.id,
     sessions: Object.keys(sessions).length,
+    debugger_tabs: Object.keys(attached).length,
     commands: debug_commands,
   }
   for (const port of debug_ports) {
@@ -114,7 +115,7 @@ function target_info(tab) {
 }
 
 function detached(source) {
-  if (!attached[source.tabId]) return
+  if (!sessions[String(source.tabId)]) return
   delete attached[source.tabId]
   for (const [id, session] of Object.entries(sessions)) {
     if (session.tabId === source.tabId) delete sessions[id]
@@ -210,6 +211,12 @@ const methods = {
   },
   async 'Target.attachToTarget'(params) {
     const tabId = Number(params.targetId)
+    if (params.execution_mode === 'api') {
+      await chrome.tabs.get(tabId)
+      sessions[String(tabId)] = { tabId }
+      debug_update()
+      return { sessionId: String(tabId) }
+    }
     if (attaching[tabId]) return attaching[tabId]
     if (attached[tabId]) return { sessionId: String(tabId) }
     return attaching[tabId] = attach_tab(tabId).finally(() => delete attaching[tabId])
@@ -220,7 +227,7 @@ const methods = {
     if (source.sessionId) {
       await chrome.debugger.sendCommand({ tabId: source.tabId }, 'Target.detachFromTarget', { sessionId: source.sessionId })
     } else {
-      await chrome.debugger.detach(source)
+      if (attached[source.tabId]) await chrome.debugger.detach(source)
       detached(source)
     }
   },
@@ -266,6 +273,7 @@ chrome.tabs.onUpdated.addListener((id, changes, tab) => {
   })
 })
 chrome.tabs.onRemoved.addListener(id => {
+  detached({ tabId: id })
   if (discovering) send({
     method: 'Target.targetDestroyed',
     params: { targetId: String(id) },
@@ -338,6 +346,7 @@ async function connect() {
       id,
       method,
       sessionId,
+      execution_mode: params.execution_mode,
       status: 'running',
     }
     debug_commands.unshift(command)
@@ -363,11 +372,62 @@ async function connect() {
             else resolve(value)
           }))
           : await object[name](...args)
+      } else if (method === '_.click' || method === '_.find') {
+        const source = sessions[sessionId]
+        if (!source || source.sessionId) throw new Error('XPath browser API commands require a registered root tab')
+        const results = await chrome.scripting.executeScript({
+          target: { tabId: source.tabId },
+          args: [method, params.xpath, params.options],
+          func: async (method, xpath, options) => {
+            if (method === '_.click') {
+              for (let i = 0; i < options.attempts; i++) {
+                const node = document.evaluate(xpath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue
+                if (node) {
+                  if (typeof node.click !== 'function') return false
+                  node.click()
+                  return true
+                }
+                if (i + 1 < options.attempts) await new Promise(resolve => setTimeout(resolve, options.interval_ms))
+              }
+              return false
+            }
+            const nodes = document.evaluate(xpath, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null)
+            const items = []
+            for (let i = 0; i < Math.min(nodes.snapshotLength, options); i++) {
+              const node = nodes.snapshotItem(i)
+              items.push({
+                node_type: node.nodeType,
+                node_name: node.nodeName,
+                text: String(node.innerText ?? node.textContent ?? '').trim().slice(0, 2000),
+                tag: node.tagName?.toLowerCase(),
+                id: node.id,
+                class: node.className == null ? undefined : String(node.className),
+                href: node.href,
+                value: node.value,
+                rect: node.getBoundingClientRect?.().toJSON(),
+              })
+            }
+            return {
+              count: nodes.snapshotLength,
+              items,
+            }
+          },
+        })
+        if (!Object.hasOwn(results[0] ?? {}, 'result')) throw new Error('XPath browser API execution failed')
+        result = {
+          result: {
+            type: typeof results[0].result,
+            value: results[0].result,
+          },
+        }
       } else {
         if (sessionId == null && !methods[method]) throw new Error('Unsupported reverse browser command: ' + method)
-        result = sessionId != null
-          ? await chrome.debugger.sendCommand(sessions[sessionId], method, params)
-          : await methods[method](params)
+        if (sessionId != null) {
+          const source = sessions[sessionId]
+          if (!source) throw new Error('Unknown debugger session: ' + sessionId)
+          await methods['Target.attachToTarget']({ targetId: String(source.tabId) })
+          result = await chrome.debugger.sendCommand(source, method, params)
+        } else result = await methods[method](params)
       }
       response = {
         id,
@@ -391,10 +451,11 @@ async function connect() {
   connection.onclose = () => {
     report_connection('Waiting for CDP.js server at ' + endpoint + '; retrying automatically.')
     discovering = false
-    disconnecting = Promise.all(Object.keys(attached).map(id => {
+    disconnecting = Promise.all(Object.keys(sessions).filter(id => !sessions[id].sessionId).map(id => {
       const source = { tabId: Number(id) }
+      const was_attached = attached[id]
       detached(source)
-      return chrome.debugger.detach(source).catch(() => {})
+      if (was_attached) return chrome.debugger.detach(source).catch(() => {})
     })).finally(() => disconnecting = null)
   }
 }

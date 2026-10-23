@@ -257,6 +257,13 @@ alone may be an older conversation that was recently updated.
 
 With all handlers installed, attach to the selected physical target and enable
 Network explicitly. `initialize: false` avoids unrelated optional target setup.
+In reverse mode the default target execution mode is now `api`; this explicit
+`Network.enable` still attaches the debugger and executes normally. It does not
+enable other domains or install bindings. Select `target.execution_mode: 'debugger'`
+only if you want the convenience CDP setup as well (and omit `initialize: false`
+for that setup). Native `chrome.webRequest.*` notifications remain an alternative
+without debugger attachment, but they do not provide CDP response-body or
+WebSocket-frame access used by this recipe.
 
 ```js
 await client.call({
