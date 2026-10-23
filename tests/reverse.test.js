@@ -20,9 +20,13 @@ test('reverse extension controls real Chrome without remote-debugging arguments'
     connect_timeout_ms: 20000,
   })
   const server = client.listen_reverse({ port: 0 })
+  const bootstrap_url = id => 'http://127.0.0.1:' + server.addr.port + '/cdp_ext?' + new URLSearchParams({
+    browser: id,
+    websocket_url: 'ws://127.0.0.1:' + server.addr.port,
+    token: 'fixture',
+  })
   const manifest = JSON.parse(await fs.readFile('cdp_ext/manifest.json', 'utf8'))
-  manifest.cdp.websocket_url = 'ws://127.0.0.1:' + server.addr.port
-  manifest.cdp.reconnect_ms = 200
+  manifest.cdp = { reconnect_ms: 200 }
   await fs.writeFile(path.join(extension, 'manifest.json'), JSON.stringify(manifest))
   await fs.copyFile('cdp_ext/cdp_ext.js', path.join(extension, 'cdp_ext.js'))
   await fs.appendFile(path.join(extension, 'cdp_ext.js'), `
@@ -82,7 +86,7 @@ chrome.cdp_probe = {
     },
   }))
   assert.equal(args.some(value => value.startsWith('--remote-debugging')), false)
-  const proc = spawn(browser.find_executable_path(), [...args, 'about:blank'], {
+  const proc = spawn(browser.find_executable_path(), [...args, bootstrap_url(browser.extension_id(extension))], {
     windowsHide: true,
     stdio: 'ignore',
   })
@@ -526,7 +530,7 @@ chrome.cdp_probe = {
         'remote-debugging-port': false,
       },
     }))
-    other_proc = spawn(browser.find_executable_path(), [...other_args, 'about:blank'], {
+    other_proc = spawn(browser.find_executable_path(), [...other_args, bootstrap_url(browser.extension_id(other_extension))], {
       windowsHide: true,
       stdio: 'ignore',
     })
@@ -620,7 +624,6 @@ test('managed reverse launch uses extension identity and keeps a live process th
     const extension = path.join(spec.args['user-data-dir'], spec.args['profile-directory'], 'cdp_ext')
     await fs.mkdir(extension, { recursive: true })
     const manifest = JSON.parse(await fs.readFile('cdp_ext/manifest.json', 'utf8'))
-    manifest.cdp.websocket_url = 'ws://127.0.0.1:0'
     await fs.writeFile(path.join(extension, 'manifest.json'), JSON.stringify(manifest))
     await fs.copyFile('cdp_ext/cdp_ext.js', path.join(extension, 'cdp_ext.js'))
     const preparation = new cdp({
@@ -820,12 +823,11 @@ test('URL bootstrap reuses normal Chrome and names profiles sharing one extensio
     reverse_server: { port: 0 },
     connect_timeout_ms: 20000,
   })
-  const server = client.listen_reverse()
+  client.listen_reverse()
   const extension = path.join(directory, 'extension')
   await fs.mkdir(extension)
   const manifest = JSON.parse(await fs.readFile('cdp_ext/manifest.json', 'utf8'))
-  manifest.cdp.websocket_url = 'ws://127.0.0.1:' + server.addr.port
-  manifest.cdp.reconnect_ms = 200
+  manifest.cdp = { reconnect_ms: 200 }
   await fs.writeFile(path.join(extension, 'manifest.json'), JSON.stringify(manifest))
   await fs.copyFile('cdp_ext/cdp_ext.js', path.join(extension, 'cdp_ext.js'))
   await fs.appendFile(path.join(extension, 'cdp_ext.js'), `
@@ -840,17 +842,33 @@ chrome.cdp_probe = {
 }
 `)
   const first_profile = path.join(directory, 'first')
-  const ready = util.on_first(client, 'reverse_' + browser.extension_id(extension))
+  const startup = createServer((request, response) => {
+    response.end('Ready')
+    startup.emit('ready')
+  })
+  startup.listen(0, '127.0.0.1')
+  await once(startup, 'listening')
+  const ready = once(startup, 'ready')
   const first = await browser.launch({
     cdp_ext: true,
     extension_path: extension,
     user_data_dir: first_profile,
+    bootstrap_url: 'http://127.0.0.1:' + startup.address().port,
     args: {
       'enable-automation': false,
       'window-position': '-32000,-32000',
     },
   })
   const first_exited = once(first.proc, 'exit')
+  const update_profile_preferences = browser.update_profile_preferences
+  const updates = []
+  browser.update_profile_preferences = async (filename, preferences) => {
+    await update_profile_preferences(filename, preferences)
+    updates.push({
+      filename,
+      preferences,
+    })
+  }
   let second
   let second_exited
   const call = (name, method = 'Runtime.evaluate', params = {}, target = 'page') => client.call({
@@ -886,8 +904,11 @@ chrome.cdp_probe = {
     assert.equal(record.cdp_ext_install, false)
     assert.deepEqual(record.extensions, ['*', extension], 'wildcard expansion preserves caller options')
     assert.ok(record.opener.spawnargs.includes('--disable-extensions-except=' + extension))
-    assert.equal(JSON.parse(await fs.readFile(path.join(first_profile, 'Default', 'Preferences'), 'utf8')).test.bootstrap, true)
-    assert.equal(JSON.parse(await fs.readFile(path.join(first_profile, 'Local State'), 'utf8')).test.bootstrap, true)
+    assert.ok(record.opener.spawnargs.includes('--no-first-run'))
+    assert.ok(record.opener.spawnargs.includes('--disable-search-engine-choice-screen'))
+    for (const filename of [path.join(first_profile, 'Default', 'Preferences'), path.join(first_profile, 'Local State')]) {
+      assert.ok(updates.some(update => update.filename === filename && update.preferences['test.bootstrap'] === true), 'profile updates are independent of extension installation')
+    }
     assert.equal(client.reverse_sockets['system-one'], record.socket)
     assert.equal(client.reverse_sockets[record.extension_id], undefined)
     assert.ok(!record.opener.spawnargs.some(arg => /^--(enable-automation|headless|remote-debugging)/.test(arg)))
@@ -954,6 +975,8 @@ chrome.cdp_probe = {
     second = client.browsers['system-two'].opener
     second_exited = once(second, 'exit')
     assert.equal(second.exitCode, null, 'the URL opener starts Chrome when that profile is not running')
+    assert.ok(second.spawnargs.includes('--no-first-run'))
+    assert.ok(second.spawnargs.includes('--disable-search-engine-choice-screen'))
     assert.equal(client.browsers['system-two'].extension_id, record.extension_id, 'both profiles load the same extension directory')
     assert.notEqual(client.browsers['system-two'].socket, record.socket)
     assert.deepEqual(Object.keys(client.reverse_sockets).sort(), ['system-one', 'system-two'])
@@ -963,6 +986,9 @@ chrome.cdp_probe = {
     assert.equal(first.proc.exitCode, null, 'manager close preserves reused Chrome')
     assert.equal(second.exitCode, null, 'manager close preserves Chrome opened through the system-profile path')
   } finally {
+    browser.update_profile_preferences = update_profile_preferences
+    startup.closeAllConnections()
+    await new Promise(resolve => startup.close(resolve))
     second ??= client.browsers['system-two']?.opener
     if (second && !second_exited && second.exitCode === null) second_exited = once(second, 'exit')
     await client.close()
@@ -974,14 +1000,19 @@ chrome.cdp_probe = {
 })
 
 test('extension installation defaults to the effective directory without opening system Chrome', async () => {
+  const directory = await fs.mkdtemp(path.resolve('build/tests/option-combinations-'))
   const launch = browser.launch
   const client = new cdp({
+    base_path: directory,
     cdp_ext: true,
     reverse_server: { port: 0 },
+    local_state: { 'test.value': 1 },
   })
+  let expected_install = false
+  let expected_directory = false
   browser.launch = async options => {
-    assert.equal(options.cdp_ext_install, false)
-    assert.equal(options.args['user-data-dir'] ?? null, null)
+    assert.equal(options.cdp_ext_install, expected_install)
+    assert.equal(!!browser.build_args(options)['user-data-dir'], expected_directory)
     assert.equal(new URL(options.bootstrap_url).searchParams.get('browser'), options.name)
     throw new Error('Link opening intercepted')
   }
@@ -1001,6 +1032,78 @@ test('extension installation defaults to the effective directory without opening
       },
     }), /Link opening intercepted/)
     assert.equal(client.browsers['raw-override'].extension_path, undefined)
+    const cases = [
+      {
+        name: 'custom',
+        spec: { user_data_dir: path.join(directory, 'custom') },
+        install: true,
+      },
+      {
+        name: 'raw-custom',
+        spec: { args: { 'user-data-dir': path.join(directory, 'raw-custom') } },
+        install: true,
+      },
+      {
+        name: 'raw-disabled',
+        spec: {
+          user_data_dir: path.join(directory, 'raw-disabled'),
+          args: { 'user-data-dir': false },
+        },
+        install: false,
+      },
+      {
+        name: 'existing',
+        spec: {
+          user_data_dir: path.join(directory, 'existing'),
+          cdp_ext_install: false,
+          update_preferences: true,
+        },
+        install: false,
+      },
+      {
+        name: 'no-preferences',
+        spec: {
+          user_data_dir: path.join(directory, 'no-preferences'),
+          cdp_ext_install: true,
+          update_preferences: false,
+        },
+        install: true,
+      },
+      {
+        name: 'system-forced',
+        spec: {
+          cdp_ext_install: true,
+          update_preferences: true,
+        },
+        install: true,
+      },
+    ]
+    for (const scenario of cases) {
+      const user_data_dir = scenario.spec.args?.['user-data-dir'] ?? scenario.spec.user_data_dir
+      expected_directory = !!user_data_dir
+      expected_install = scenario.install
+      await assert.rejects(client.call({
+        method: 'Browser.getVersion',
+        params: {
+          browser: {
+            name: scenario.name,
+            ...scenario.spec,
+          },
+        },
+      }), /Link opening intercepted/)
+      const record = client.browsers[scenario.name]
+      assert.equal(!!record.extension_path, scenario.install)
+      if (record.extension_path) assert.ok(record.extension_path.startsWith(directory))
+      const profile = user_data_dir || path.join(directory, scenario.name)
+      const preferences = fs.access(path.join(profile, 'Default', 'Preferences'))
+      const local_state = fs.access(path.join(profile, 'Local State'))
+      if (expected_directory && scenario.spec.update_preferences !== false) await Promise.all([preferences, local_state])
+      else await Promise.all([
+        assert.rejects(preferences, { code: 'ENOENT' }),
+        assert.rejects(local_state, { code: 'ENOENT' }),
+      ])
+      assert.equal(client.server, null)
+    }
   } finally {
     browser.launch = launch
     await client.close()

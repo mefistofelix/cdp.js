@@ -86,6 +86,13 @@ One extension directory can serve multiple profiles; a conflicting live binding
 returns an error instead of stealing or aliasing that profile's connection.
 The extension reads startup tabs and URL changes, saving only bootstrap settings
 in native `chrome.storage.session`, never manager session/target mappings.
+Before the first valid trigger it makes no connection/HTTP requests; there is no
+default destination or manifest endpoint fallback. Worker restarts can resume
+the session's previous trigger. While disconnected after a trigger, check the
+existing HTTP `/cdp_ext` marker with a two-second timeout before opening a socket.
+Coalesce concurrent checks and log waiting/connected status only on transitions.
+Expected offline fetch failures are handled; do not claim JavaScript handlers can
+suppress Chromium's native WebSocket console diagnostics during a check/upgrade race.
 Accept only loopback bootstrap URLs with a same-host/port WebSocket endpoint.
 `reverse: true` remains passive attachment by native `extension_id` or browser
 label and never opens a URL or writes profile files.
@@ -96,13 +103,19 @@ including raw overrides. True prepares the copy and startup loading switches;
 false uses an already installed extension with the same argument generation and
 wildcard expansion, skipping only the automation preset. Preference writes are
 independently controlled by `update_preferences` and require a directory.
+Keep `no-first-run` and `disable-search-engine-choice-screen` in both launch
+paths before raw overrides; skipping the automation preset must not reintroduce
+onboarding/search-selection dialogs. Do not set a search provider in preferences.
 This launcher is `record.opener`, unowned
 and preserved on manager close. A forwarding launcher's exit is not browser exit.
 Forced installation with no directory places only the extension copy under the
 named base-path profile directory and omits the user-data switch. Never infer
 system profile paths for preference writes. Chrome cannot apply new extension
 loading switches to an already running instance.
-The copy sets only the server URL, never the logical name. Its canonical path is
+The copy preserves the source files; name, server URL and token arrive only through
+the trigger. The shipped manifest has no nonstandard keys; optional custom
+`cdp.reconnect_ms` remains supported, with a default of 5000 in the worker.
+Its canonical path is
 `record.extension_path`; the native ID is `record.extension_id`.
 Preserve platform-specific path encoding in `browser.extension_id`.
 An unpacked manifest must have no `key` for this path-derived identity.

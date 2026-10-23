@@ -1,4 +1,6 @@
-const config = chrome.runtime.getManifest().cdp ?? {}
+const config = {
+  reconnect_ms: chrome.runtime.getManifest().cdp?.reconnect_ms ?? 5000,
+}
 const configured = chrome.storage.session.get('cdp_bootstrap').then(value => Object.assign(config, value.cdp_bootstrap))
 const sessions = {}
 const attached = {}
@@ -8,6 +10,14 @@ let disconnecting
 let discovering = false
 let auto_attach = {}
 let bootstrapping
+let checking = false
+let connection_message
+
+function report_connection(message) {
+  if (connection_message === message) return
+  connection_message = message
+  console.info('[cdp_ext] ' + message)
+}
 
 async function bootstrap(tab) {
   const text = tab.pendingUrl ?? tab.url ?? ''
@@ -245,15 +255,43 @@ for (const [name, options] of Object.entries({
 
 async function connect() {
   await configured
-  if (disconnecting) return
+  if (!config.browser || !config.websocket_url || !config.token) return
+  if (disconnecting || checking) return
   if (socket?.readyState === WebSocket.CONNECTING) return
   if (socket?.readyState === WebSocket.OPEN) return socket.send('')
-  const connection = socket = new WebSocket(config.websocket_url ?? 'ws://127.0.0.1:9223')
-  connection.onopen = () => connection.send(JSON.stringify({
-    browser: config.browser ?? chrome.runtime.id,
-    extension_id: chrome.runtime.id,
-    token: config.token,
-  }))
+  const endpoint = config.websocket_url
+  const url = new URL(endpoint)
+  url.protocol = url.protocol === 'wss:' ? 'https:' : 'http:'
+  url.pathname = '/cdp_ext'
+  url.search = ''
+  url.hash = ''
+  let available = false
+  checking = true
+  try {
+    const response = await fetch(url, {
+      cache: 'no-store',
+      signal: AbortSignal.timeout(2000),
+    })
+    available = response.ok && await response.text() === 'CDP.js browser connection'
+  } catch (error) {
+    if (!(error instanceof TypeError) && error.name !== 'TimeoutError') throw error
+  } finally {
+    checking = false
+  }
+  if (endpoint !== config.websocket_url) return connect()
+  if (!available) {
+    report_connection('Waiting for CDP.js server at ' + endpoint + '; retrying automatically.')
+    return
+  }
+  const connection = socket = new WebSocket(endpoint)
+  connection.onopen = () => {
+    report_connection('Connected to CDP.js server at ' + endpoint + '.')
+    connection.send(JSON.stringify({
+      browser: config.browser,
+      extension_id: chrome.runtime.id,
+      token: config.token,
+    }))
+  }
   connection.onmessage = async event => {
     if (!event.data) return
     const request = JSON.parse(event.data)
@@ -300,6 +338,7 @@ async function connect() {
     if (id != null && connection.readyState === WebSocket.OPEN) connection.send(JSON.stringify(response))
   }
   connection.onclose = () => {
+    report_connection('Waiting for CDP.js server at ' + endpoint + '; retrying automatically.')
     discovering = false
     disconnecting = Promise.all(Object.keys(attached).map(id => {
       const source = { tabId: Number(id) }
@@ -323,5 +362,5 @@ async function start() {
 chrome.runtime.onStartup.addListener(start)
 chrome.alarms.onAlarm.addListener(connect)
 chrome.alarms.create('cdp-reconnect', { periodInMinutes: 0.5 })
-setInterval(connect, config.reconnect_ms ?? 5000)
+setInterval(connect, config.reconnect_ms)
 start()

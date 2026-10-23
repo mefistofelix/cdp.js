@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "CDP reverse connection",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "minimum_chrome_version": "125",
   "permissions": [
     "accessibilityFeatures.read",
@@ -68,9 +68,5 @@
   "incognito": "spanning",
   "background": {
     "service_worker": "cdp_ext.js"
-  },
-  "cdp": {
-    "websocket_url": "ws://127.0.0.1:9223",
-    "reconnect_ms": 5000
   }
 }

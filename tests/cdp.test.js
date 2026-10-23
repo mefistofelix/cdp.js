@@ -466,6 +466,83 @@ test('CLI options remain editable key/value objects until argv materialization',
   })['no-proxy-server'], false)
 })
 
+test('launch modes share option handling and preserve raw overrides', () => {
+  const modes = [
+    {},
+    { cdp_ext_install: false },
+    { cdp_ext_install: true },
+    {
+      cdp_ext: true,
+      cdp_ext_install: true,
+      extension_path: '/bridge',
+    },
+    {
+      cdp_ext: true,
+      cdp_ext_install: false,
+    },
+  ]
+  const cases = [
+    {
+      options: {},
+      includes: ['--no-first-run', '--disable-search-engine-choice-screen'],
+      excludes: ['--headless=new'],
+    },
+    {
+      options: { headless: true },
+      includes: ['--headless=new', '--window-size=1440,900'],
+      excludes: [],
+    },
+    {
+      options: {
+        headless: true,
+        args: {
+          headless: false,
+          'no-first-run': false,
+          'disable-search-engine-choice-screen': false,
+        },
+      },
+      includes: [],
+      excludes: ['--headless=new', '--no-first-run', '--disable-search-engine-choice-screen'],
+    },
+    {
+      options: {
+        proxy: 'http://proxy',
+        images: false,
+        translations: true,
+        login: true,
+        args: {
+          'proxy-server': 'socks5://override',
+          'blink-settings': false,
+        },
+      },
+      includes: ['--proxy-server=socks5://override'],
+      excludes: ['--proxy-server=http://proxy', '--blink-settings=imagesEnabled=false', '--disable-sync'],
+    },
+    {
+      options: {
+        extensions: Object.freeze(['*', '/extra']),
+        args: {
+          'disable-extensions-except': '/raw',
+          'disable-features': Object.freeze(['CustomFeature']),
+          'remote-debugging-port': 4567,
+        },
+      },
+      includes: ['--disable-extensions-except=/raw', '--disable-features=CustomFeature,DisableDisableExtensionsExceptCommandLineSwitch', '--remote-debugging-port=4567'],
+      excludes: ['--remote-debugging-port=0'],
+    },
+  ]
+  for (const mode of modes) {
+    for (const scenario of cases) {
+      const argv = util.args_to_strings(browser.build_args({
+        ...mode,
+        ...scenario.options,
+      }))
+      for (const arg of scenario.includes) assert.ok(argv.includes(arg), JSON.stringify(mode) + ' must include ' + arg)
+      for (const arg of scenario.excludes) assert.ok(!argv.includes(arg), JSON.stringify(mode) + ' must omit ' + arg)
+    }
+  }
+})
+
 test('browser proxies and named contexts route traffic and manage lifetime independently', { timeout: 60000 }, async t => {
   const proxies = []
   for (const name of ['first', 'second']) {
@@ -801,6 +878,85 @@ test('local extensions and profile wildcard load during browser startup', { time
     const loaded = await call(overridden, 'Extensions.getExtensions', {}, null)
     assert.deepEqual(loaded.extensions.map(extension => extension.name), selector ? ['Local example'] : [])
   }
+})
+
+test('extension waits for a trigger and retries an absent server without WebSocket errors', async t => {
+  const directory = await fs.mkdtemp(path.join(build, 'offline-extension-'))
+  const extension = path.join(directory, 'extension')
+  await fs.mkdir(extension)
+  const manifest = JSON.parse(await fs.readFile('cdp_ext/manifest.json', 'utf8'))
+  manifest.cdp = { reconnect_ms: 10000 }
+  await fs.writeFile(path.join(extension, 'manifest.json'), JSON.stringify(manifest))
+  await fs.copyFile('cdp_ext/cdp_ext.js', path.join(extension, 'cdp_ext.js'))
+  let requests = 0
+  const server = createServer((request, response) => {
+    requests++
+    response.writeHead(503)
+    response.end('Not a CDP.js server')
+  })
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  const port = server.address().port
+  await new Promise(resolve => server.close(resolve))
+  t.after(async () => {
+    if (server.listening) await new Promise(resolve => server.close(resolve))
+  })
+  const client = await fixture(t, { extensions: [extension] })
+  await call(client, 'Browser.getVersion', {}, null)
+  const { targetInfos } = await call(client, 'Target.getTargets', {}, null)
+  const worker = targetInfos.find(info => info.type === 'service_worker' && info.url.endsWith('/cdp_ext.js'))
+  assert.ok(worker, 'the extension loads before a trigger exists')
+  const target = {
+    name: 'extension-worker',
+    targetId: worker.targetId,
+    initialize: false,
+  }
+  const messages = []
+  const errors = []
+  let websockets = 0
+  client.addEventListener('Runtime.consoleAPICalled', event => {
+    if (event.detail.target === target.name) messages.push(event.detail.args.map(arg => arg.value).join(' '))
+  })
+  client.addEventListener('Log.entryAdded', event => {
+    if (event.detail.target === target.name && event.detail.entry.level === 'error') errors.push(event.detail.entry.text)
+  })
+  client.addEventListener('Runtime.exceptionThrown', event => {
+    if (event.detail.target === target.name) errors.push(event.detail.exceptionDetails.text)
+  })
+  client.addEventListener('Network.webSocketCreated', event => {
+    if (event.detail.target === target.name) websockets++
+  })
+  for (const method of ['Runtime.enable', 'Log.enable', 'Network.enable']) await call(client, method, {}, target)
+  const evaluate = async expression => {
+    const result = await call(client, 'Runtime.evaluate', {
+      expression,
+      awaitPromise: true,
+      returnByValue: true,
+    }, target)
+    assert.equal(result.exceptionDetails, undefined)
+    return result.result.value
+  }
+  await evaluate('Promise.all([connect(), connect(), connect()])')
+  assert.deepEqual(messages, [], 'no connection attempts or status noise before the trigger')
+  assert.equal(websockets, 0)
+  const trigger = 'http://127.0.0.1:' + port + '/cdp_ext?' + new URLSearchParams({
+    browser: 'offline-fixture',
+    websocket_url: 'ws://127.0.0.1:' + port,
+    token: 'fixture',
+  })
+  await evaluate('bootstrap({ url: ' + JSON.stringify(trigger) + ' })')
+  await evaluate('(async () => { for (let i = 0; i < 3; i++) await connect() })()')
+  assert.equal(messages.length, 1, 'offline retries log one clear status message')
+  assert.match(messages[0], /Waiting for CDP.js server.*retrying automatically/)
+  assert.equal(websockets, 0, 'a closed port does not produce failing WebSocket handshakes')
+  assert.deepEqual(errors, [], 'caught HTTP checks produce no worker console errors')
+  server.listen(port, '127.0.0.1')
+  await once(server, 'listening')
+  await evaluate('Promise.all([connect(), connect(), connect()])')
+  assert.equal(requests, 1, 'concurrent retries share one availability check')
+  assert.equal(messages.length, 1)
+  assert.equal(websockets, 0, 'an incompatible HTTP server is not treated as a WebSocket endpoint')
+  assert.deepEqual(errors, [])
 })
 
 test('standalone launch and manager opt-out leave configured preferences unchanged', async t => {

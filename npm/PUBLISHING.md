@@ -70,7 +70,7 @@ For releases affecting reverse mode, install that archive into a disposable
 directory and exercise a managed `cdp_ext: true` launch under Deno and Bun from the
 installed entry point. The manager must find both packaged extension files and
 write its profile-specific copy automatically. Check the copied worker bytes and
-the copied manifest's server URL; it must not depend on repository source paths.
+the source manifest and trigger's server URL; it must not depend on repository source paths.
 
 ## Authentication and trusted publisher
 

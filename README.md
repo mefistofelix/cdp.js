@@ -542,8 +542,8 @@ await client.call({
 Provide `user_data_dir` or raw `args['user-data-dir']` to choose a custom
 directory. An effective custom directory makes `cdp_ext_install` default to true:
 the manager copies the two extension files into
-`<user-data-dir>/<profile-directory>/cdp_ext/` (`Default` when unset), sets the
-shared server URL in that manifest and adds startup loading flags. Normal launch
+`<user-data-dir>/<profile-directory>/cdp_ext/` (`Default` when unset) and adds
+startup loading flags. The server address comes only from the trigger URL. Normal launch
 options and profile preferences then apply. Set `cdp_ext_install: false` to use
 an extension already installed in that profile, or true to force preparation and
 loading. A null/false raw directory override makes automatic installation default off.
@@ -568,6 +568,13 @@ and enable the bridge. An `extensions` array adds its directories;
 `extensions: true` retains enabled profile extensions through `'*'`. Raw `args`
 still win and can prevent loading or connection.
 
+Both launch paths keep `--no-first-run` and
+`--disable-search-engine-choice-screen`, including when opening a new custom
+profile with installation disabled. This suppresses onboarding and the search
+engine selection prompt without changing the chosen search provider or writing
+search preferences. Raw `args` can override either flag. An existing Chrome only
+receives the URL; new startup flags require restarting that instance.
+
 The manager opens an actual local HTTP URL on the shared listener, for example
 `http://127.0.0.1:9223/cdp_ext?browser=work&websocket_url=...&token=...`.
 The port is the effective listening port, including an automatically allocated
@@ -590,15 +597,22 @@ manager while connected returns an explicit error, preserving the existing
 connection. After disconnection, a new bootstrap can rebind it.
 
 Passive external attachment remains available through `reverse: true`: it opens
-no URL and waits for `extension_id` (or the browser label). Without bootstrap,
-the extension announces its native ID and uses its manifest endpoint. This
-compatibility mode is optional; `cdp_ext: true` needs neither `reverse` nor an ID.
+no URL and waits for `extension_id` (or the browser label). This compatibility
+mode is optional; `cdp_ext: true` needs neither `reverse` nor an ID.
+The current extension still requires a trigger URL in passive mode; it never
+connects automatically to a manifest endpoint or a default port.
 
-The manifest's `cdp` configuration supplies initial connection defaults:
+The extension stays idle until a valid trigger URL supplies the logical name,
+WebSocket endpoint and token. Before that it makes no server requests and logs
+no connection messages. A worker restart may resume the same browser session's
+previous trigger from `chrome.storage.session`.
+
+The shipped manifest needs no custom configuration keys. An optional custom
+`cdp.reconnect_ms` override remains supported (Chrome displays a harmless
+unrecognized-key warning if it is added):
 
 | Manifest `cdp` key | Default | Meaning |
 | --- | --- | --- |
-| `websocket_url` | `ws://127.0.0.1:9223` | Initial shared endpoint; URL bootstrap overrides it. |
 | `reconnect_ms` | `5000` | Awake retry and connected heartbeat interval; use a positive value below 30000. |
 
 Construction and direct CDP calls do not start a listener. The first browser call
@@ -662,10 +676,20 @@ another connection attempt; the configured interval applies while it is awake.
 Connected empty-text heartbeats keep an otherwise idle WebSocket worker active.
 These are transport messages, not event buffering or polling of browser state.
 
+After a trigger, the server may be offline normally. Before each disconnected
+WebSocket attempt the extension checks the same server's HTTP `/cdp_ext` endpoint
+with a two-second timeout and no cache. It opens the socket only when that
+endpoint identifies CDP.js. Concurrent retries share the check; an unavailable or
+incompatible server causes one informational waiting message, not a failing
+WebSocket attempt on every timer tick. Successful connections and later
+disconnects log their status once per transition. Chrome can still emit a native
+network diagnostic if the server disappears between the HTTP check and upgrade.
+
 ### Reverse protocol and supported commands
 
-The first announcement contains `{ browser, extension_id, token }` for bootstrap,
-or the native extension ID for passive attachment. Subsequent messages use CDP envelopes:
+The current extension's first announcement contains `{ browser, extension_id, token }`
+after a trigger. The server also accepts legacy native-ID announcements.
+Subsequent messages use CDP envelopes:
 
 - Request: `{ id, method, params, sessionId? }`.
 - Response: `{ id, result }` or `{ id, error: { code, message } }`.
@@ -1805,5 +1829,11 @@ already running instance, startup when absent, one shared extension directory,
 logical names, binding tokens, conflicting names and preservation on manager close.
 Installation defaults, raw directory overrides, profile writes independent of
 installation and shared wildcard expansion are covered without opening personal profiles.
+Argument coverage crosses direct/extension launch modes with headless, proxy,
+image/login/translation options, extension selectors and raw overrides. Profile
+combinations include default/custom directories, null/false raw directory
+overrides, forced installation and independent preference-write controls.
+Offline worker checks verify silence before a trigger, deduplicated waiting logs,
+no WebSocket attempts against absent/incompatible servers and concurrent retry checks.
 The npm tarball contains `package.json`, `cdp.js`, `README.md` and the two extension
 files required by managed reverse launches.

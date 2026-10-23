@@ -153,12 +153,10 @@ export class browser {
       'disable-prompt-on-repost': true,
       'force-color-profile': 'srgb',
       'metrics-recording-only': true,
-      'no-first-run': true,
       'password-store': 'basic',
       'use-mock-keychain': true,
       'no-service-autorun': true,
       'export-tagged-pdf': true,
-      'disable-search-engine-choice-screen': true,
       'disable-features': [
         'InfiniteSessionRestore',
         'ImprovedCookieControls',
@@ -177,6 +175,8 @@ export class browser {
       'user-data-dir': options.user_data_dir,
       'remote-debugging-port': 0,
     }
+    args['no-first-run'] = true
+    args['disable-search-engine-choice-screen'] = true
     if (options.headless) {
       args.headless = 'new'
       args['window-size'] = '1440,900'
@@ -658,9 +658,7 @@ export class cdp extends EventTarget {
           await fs.mkdir(record.extension_path, { recursive: true })
           record.extension_path = await fs.realpath(record.extension_path)
           record.extension_id = browser.extension_id(record.extension_path)
-          const manifest = JSON.parse(await fs.readFile(new URL('./cdp_ext/manifest.json', import.meta.url), 'utf8'))
-          manifest.cdp.websocket_url = record.reverse_url
-          await fs.writeFile(path.join(record.extension_path, 'manifest.json'), JSON.stringify(manifest))
+          await fs.copyFile(new URL('./cdp_ext/manifest.json', import.meta.url), path.join(record.extension_path, 'manifest.json'))
           await fs.copyFile(new URL('./cdp_ext/cdp_ext.js', import.meta.url), path.join(record.extension_path, 'cdp_ext.js'))
         }
         if (args['user-data-dir'] && record.update_preferences !== false) {
