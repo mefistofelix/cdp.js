@@ -928,7 +928,10 @@ test('extension waits for a trigger and retries an absent server without WebSock
   const errors = []
   let websockets = 0
   client.addEventListener('Runtime.consoleAPICalled', event => {
-    if (event.detail.target === target.name) messages.push(event.detail.args.map(arg => arg.value).join(' '))
+    if (event.detail.target !== target.name) return
+    const message = event.detail.args.map(arg => arg.value).join(' ')
+    messages.push(message)
+    if (message.includes('Waiting for CDP.js server')) util.emit(client, 'test_waiting_log')
   })
   client.addEventListener('Log.entryAdded', event => {
     if (event.detail.target === target.name && event.detail.entry.level === 'error') errors.push(event.detail.entry.text)
@@ -987,10 +990,13 @@ test('extension waits for a trigger and retries an absent server without WebSock
     'http://127.0.0.1:' + port + '/cdp_ext?browser=missing-arguments',
     trigger.replace('websocket_url=', 'wrong_parameter='),
   ]) unrelated_tabs.push((await call(client, 'Target.createTarget', { url }, null)).targetId)
+  const waiting_log = util.on_first(client, 'test_waiting_log')
   const trigger_closed = util.on_first(client, 'Target.targetDestroyed')
   const trigger_tab = await call(client, 'Target.createTarget', { url: trigger }, null)
   assert.equal((await trigger_closed).args[0].detail.targetId, trigger_tab.targetId)
+  await evaluate('(async () => { while (bootstrapping) await bootstrapping })()')
   await evaluate('(async () => { for (let i = 0; i < 3; i++) await connect() })()')
+  await waiting_log
   assert.equal(messages.length, 1, 'offline retries log one clear status message')
   assert.match(messages[0], /Waiting for CDP.js server.*retrying automatically/)
   assert.equal(websockets, 0, 'a closed port does not produce failing WebSocket handshakes')

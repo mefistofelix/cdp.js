@@ -188,6 +188,10 @@ export class browser {
     }
     if (options.cdp_ext) {
       args['remote-debugging-port'] = false
+      if (options.cdp_ext_user_scripts) {
+        args['extensions-on-chrome-urls'] = true
+        args['disable-features'].push('DisableExtensionsOnChromeUrlsSwitch')
+      }
       delete args['disable-extensions']
       delete args['disable-component-extensions-with-background-pages']
       if (options.extension_path) args['disable-extensions-except'] = [
@@ -383,7 +387,7 @@ export class cdp extends EventTarget {
           const error = new Error(message.error)
           if (record) record.reverse_error = error
           util.emit(this, 'reverse_' + encodeURIComponent(id), error)
-          return socket.close(1008, 'Chrome profile already connected')
+          return socket.close(1008, 'Reverse browser initialization failed')
         }
         if (record) record.extension_id = extension_id
         this.reverse_sockets[id] = socket
@@ -489,18 +493,25 @@ export class cdp extends EventTarget {
         sessionId: entry.sessionId,
       })
       const results = await record.socket.req({
-        method: 'chrome.scripting.executeScript',
+        method: 'chrome.userScripts.execute',
         params: {
           args: [{
             target: { tabId: Number(entry.targetId) },
             world: 'MAIN',
-            func: 'async (...args) => ({ value: await (' + fn + ')(...args) })',
-            args: [xpath, options ?? null],
+            js: [{
+              code: `(async () => {
+                try {
+                  return { value: await (${fn})(...${JSON.stringify([xpath, options])}) }
+                } catch (error) {
+                  return { error: String(error) }
+                }
+              })()`,
+            }],
           }],
         },
       })
-      const result = results[0]?.result
-      if (!result) throw new Error('Browser API evaluation failed; check page CSP and extension access. No debugger fallback was used.')
+      const result = results[0].result
+      if (!result || Object.hasOwn(result, 'error')) throw new Error(result?.error ?? results[0].error ?? 'XPath callback did not execute')
       return {
         result: {
           type: typeof result.value,
@@ -648,6 +659,14 @@ export class cdp extends EventTarget {
   }
 
   async _connect(record) {
+    const args = browser.build_args(record)
+    if (record.cdp_ext) {
+      record.cdp_ext_install ??= !!args['user-data-dir']
+      record.cdp_ext_user_scripts ??= record.cdp_ext_install && !!args['user-data-dir']
+      if (record.cdp_ext_user_scripts && (!record.cdp_ext_install || !args['user-data-dir'])) {
+        throw new Error('Automatic user-script access requires cdp_ext_install and a custom user-data-dir')
+      }
+    }
     if (record.reverse || record.cdp_ext) {
       await this.server_closing
       if (!this.server) this.listen_reverse()
@@ -663,6 +682,7 @@ export class cdp extends EventTarget {
         bootstrap.searchParams.set('browser', record.name)
         bootstrap.searchParams.set('websocket_url', record.reverse_url)
         bootstrap.searchParams.set('token', record.reverse_token)
+        if (record.cdp_ext_user_scripts) bootstrap.searchParams.set('user_scripts', '1')
         record.bootstrap_url = bootstrap.href
       }
       delete record.reverse_error
@@ -676,8 +696,6 @@ export class cdp extends EventTarget {
       url = (await response.json()).webSocketDebuggerUrl
     }
     if (record.cdp_ext || (!record.reverse && !url)) {
-      const args = browser.build_args(record)
-      if (record.cdp_ext) record.cdp_ext_install ??= !!args['user-data-dir']
       if ((record.proc?.exitCode === null && record.proc.signalCode === null) ||
           (record.opener?.exitCode === null && record.opener.signalCode === null)) url = record.socket?.url
       else {
@@ -692,6 +710,12 @@ export class cdp extends EventTarget {
           record.extension_id = browser.extension_id(record.extension_path)
           for (const filename of ['manifest.json', 'cdp_ext.js', 'sidebar.html', 'sidebar.js']) {
             await fs.copyFile(new URL('./cdp_ext/' + filename, import.meta.url), path.join(record.extension_path, filename))
+          }
+          if (record.cdp_ext_user_scripts) {
+            const filename = path.join(record.extension_path, 'manifest.json')
+            const manifest = JSON.parse(await fs.readFile(filename, 'utf8'))
+            manifest.host_permissions.push('chrome://extensions/*')
+            await fs.writeFile(filename, JSON.stringify(manifest, null, 2) + '\n')
           }
         }
         if (args['user-data-dir'] && record.update_preferences !== false) {

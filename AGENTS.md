@@ -11,7 +11,7 @@ Apply the user's current instructions to the task at hand.
 | --- | --- |
 | `cdp.js` | Complete maintained implementation, an ES module importing only Node.js built-ins. |
 | `tests/cdp.test.js` | Node/Bun test-runner coverage with real headless Chromium. |
-| `tests/reverse.test.js` | Shared Deno/Bun coverage with the real extension and headless/normal Chrome; reverse execution uses no remote-debugging flags. Direct CDP prepares disposable user-script/incognito grant fixtures. |
+| `tests/reverse.test.js` | Shared Deno/Bun coverage with the real extension and headless/normal Chrome; reverse execution uses no remote-debugging flags. Direct CDP prepares disposable incognito grant fixtures; user-script consent is exercised through reverse setup. |
 | `cdp_ext/` | Manifest V3 reverse transport: one worker, manifest and minimal HTML/JS debug sidebar. |
 | `examples/reverse.mjs` | Native Deno/Bun server example. |
 | `tests/chat-monitoring.md` | Manual application traffic inspection and tool-session extraction recipe. |
@@ -53,7 +53,7 @@ exports and are grouped in the default export.
 
 Do not move the CDP manager into `browser`. The browser helpers operate on
 options/files/processes, not CDP connections or target/session routing.
-`evaluate_xpath` belongs to `cdp` because it issues `Runtime.evaluate`; only the
+`evaluate_xpath` belongs to `cdp` because it executes through CDP or userScripts; only the
 string rewrite belongs to `util`.
 
 `new jsrpc(socket)` decorates and returns an accepted EventTarget socket, reusing
@@ -122,8 +122,10 @@ Forced installation with no directory places only the extension copy under the
 named base-path profile directory and omits the user-data switch. Never infer
 system profile paths for preference writes. Chrome cannot apply new extension
 loading switches to an already running instance.
-The copy preserves the source files; name, server URL and token arrive only through
-the trigger. The shipped manifest has no nonstandard keys; optional custom
+The copy preserves worker/sidebar source bytes. When automatic user-script consent
+is enabled, only the managed manifest copy adds `chrome://extensions/*` host access.
+Name, server URL and token arrive only through the trigger. The shipped manifest
+keeps normal host permissions and no nonstandard keys; optional custom
 `cdp.reconnect_ms` remains supported, with a default of 5000 in the worker.
 Its canonical path is
 `record.extension_path`; the native ID is `record.extension_id`.
@@ -155,9 +157,18 @@ attachment event with the same routing ID must preserve the target's readiness.
 in API mode; they need no eval, CSP bypass or user-script grant. The browser-side
 implementations in the worker and direct serialized functions must keep their
 XPath/options/result semantics aligned; integration tests compare their values
-and exercise actual DOM changes under restrictive CSP. `evaluate_xpath` with an
-arbitrary function uses the existing string scripting adapter in MAIN in API mode,
-so page CSP applies. Missing execution results reject, without debugger fallback.
+and exercise actual DOM changes under restrictive CSP. These built-ins accept
+XPath/options data and never require userScripts. The public
+`evaluate_xpath(params, fn, options)` is a different contract: `fn` is arbitrary
+caller-supplied executable code. In API mode serialize its invocation directly
+into `chrome.userScripts.execute` with MAIN, avoiding the scripting string/eval
+adapter. Require user-script access, await the function, preserve undefined with
+a value wrapper, and reject callback exceptions with their message. Never fall
+back to a debugger or silently change CSP. Native source compilation in MAIN
+works under restrictive page CSP; eval/new Function inside that source still
+obey the page policy. USER_SCRIPT worlds share the DOM but not page globals;
+configure their own CSP before first injection (or use a new worldId) to permit
+eval if explicitly requested. Do not imply that this configures MAIN's CSP.
 API helpers return `{ result: { type, value } }`; direct/debugger evaluation keeps
 native CDP data and exceptionDetails. `params.execution_mode` overrides execution
 for one built-in/helper call without modifying target configuration or triggering
@@ -183,8 +194,31 @@ buffering, filtering or authentication responder is provided. The manifest
 includes `webRequestAuthProvider` for observing `onAuthRequired`.
 CSP changes require explicit native API calls; do not bypass
 or remove CSP automatically. `chrome.userScripts` remains generic pass-through:
-its permission does not enable Chrome's user toggle. Neither extension launch nor
-profile defaults may silently enable Allow User Scripts. The manifest declares
+its manifest permission does not enable Chrome's user toggle. The user explicitly
+requested automatic consent only for managed custom-profile bridge installations.
+`cdp_ext_user_scripts` defaults to effective directory plus `cdp_ext_install`;
+explicit true without both rejects before listening/launching. False preserves
+existing grants and adds no internal-page capability. System profiles, passive
+reverse and installation-disabled paths remain manual. Never infer a system
+directory or enable incognito as part of this step.
+
+For automatic consent, generate `extensions-on-chrome-urls` and disable
+`DisableExtensionsOnChromeUrlsSwitch` before raw argument overrides; add only
+`chrome://extensions/*` to the managed manifest copy. The bootstrap URL's
+`user_scripts=1` requests the step. Before opening the socket/announcing the binding,
+the worker checks userScripts availability; if unavailable, open an inactive
+chrome://extensions tab, inject a fixed native MAIN function to call
+`chrome.developerPrivate.updateExtensionConfiguration({ extensionId, userScriptsAccess: true })`,
+and close only that temporary tab. Older Chrome uses updateProfileConfiguration
+for Developer mode. This path uses neither debugger attachment nor remote-debugging
+flags. It is Chrome-internal behavior, tested on Chrome 154, not a cross-browser
+promise. Let Chrome persist the protected permission; do not edit Secure
+Preferences, compute MACs, or add global policies. `update_preferences: false`
+controls JSON updates independently, not this native grant step. Propagate setup
+failure through the existing first-announcement error path and local trigger
+metadata. No successful binding may be announced before the grant completes.
+
+The manifest declares
 broad desktop API permissions and host access; native Chrome availability, user
 gestures and resource requirements
 still apply. Generic extension calls must not change direct CDP dispatch.

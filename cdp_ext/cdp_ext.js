@@ -12,6 +12,7 @@ let auto_attach = {}
 let bootstrapping
 let checking = false
 let connection_message
+let setup_error
 const debug_commands = []
 const debug_ports = []
 
@@ -65,6 +66,36 @@ function report_connection(message) {
   debug_update()
 }
 
+async function enable_user_scripts() {
+  try {
+    await chrome.userScripts.getScripts()
+    return
+  } catch {}
+  const tab = await chrome.tabs.create({
+    url: 'chrome://extensions/?id=' + chrome.runtime.id,
+    active: false,
+  })
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      world: 'MAIN',
+      args: [chrome.runtime.id],
+      func: async id => {
+        const version = Number(navigator.userAgent.match(/(?:Chrome|Chromium)\/(\d+)/)?.[1])
+        if (version < 138) await chrome.developerPrivate.updateProfileConfiguration({ inDeveloperMode: true })
+        else await chrome.developerPrivate.updateExtensionConfiguration({
+          extensionId: id,
+          userScriptsAccess: true,
+        })
+        return true
+      },
+    })
+    if (results[0]?.result !== true) throw new Error('Chrome did not enable user-script access')
+  } finally {
+    await chrome.tabs.remove(tab.id)
+  }
+}
+
 async function bootstrap(tab) {
   const text = tab.pendingUrl ?? tab.url ?? ''
   if (!/^http:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?\/cdp_ext\?/.test(text)) return
@@ -101,6 +132,7 @@ async function bootstrap(tab) {
           error: trigger.error,
         }))
       } else {
+        setup_error = undefined
         if (changed) {
           Object.assign(config, settings)
           connection_message = undefined
@@ -114,7 +146,7 @@ async function bootstrap(tab) {
           }
           await disconnecting
         }
-        await connect()
+        if (url.searchParams.get('user_scripts') === '1') await enable_user_scripts()
       }
       const current_tabs = await chrome.tabs.query({})
       const current = current_tabs.find(current => current.id === tab.id)
@@ -131,13 +163,14 @@ async function bootstrap(tab) {
     } catch (error) {
       trigger.status = 'error'
       trigger.error = error.message
-      throw error
+      setup_error = 'Extension setup failed: ' + error.message
     } finally {
       trigger.duration_ms = Date.now() - trigger.time
       debug_update()
     }
   })().finally(() => {
     bootstrapping = null
+    return connect()
   })
 }
 
@@ -344,7 +377,7 @@ for (const [name, options] of Object.entries({
 async function connect() {
   await configured
   if (!config.browser || !config.websocket_url || !config.token) return
-  if (disconnecting || checking) return
+  if (bootstrapping || disconnecting || checking) return
   if (socket?.readyState === WebSocket.CONNECTING) return
   if (socket?.readyState === WebSocket.OPEN) return socket.send('')
   const endpoint = config.websocket_url
@@ -378,6 +411,7 @@ async function connect() {
       browser: config.browser,
       extension_id: chrome.runtime.id,
       token: config.token,
+      error: setup_error,
     }))
   }
   connection.onmessage = async event => {

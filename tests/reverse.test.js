@@ -34,6 +34,7 @@ test('reverse targets and XPath default to browser APIs, with explicit debugger 
   })
   try {
     await call('Browser.getVersion', {}, null)
+    assert.deepEqual(await call('chrome.userScripts.getScripts', {}, null), [], 'managed custom profiles enable user-script access automatically')
     let startup_tabs
     for (let i = 0; i < 100; i++) {
       startup_tabs = await call('chrome.tabs.query', { args: [{}] }, null)
@@ -49,6 +50,9 @@ test('reverse targets and XPath default to browser APIs, with explicit debugger 
       create_params: { url: 'http://127.0.0.1:' + page_server.address().port + '/csp' },
     }))
     const record = client.browsers.main
+    assert.equal(record.cdp_ext_user_scripts, true)
+    assert.ok(record.proc.spawnargs.includes('--extensions-on-chrome-urls'))
+    assert.ok(record.proc.spawnargs.some(arg => arg.startsWith('--disable-features=') && arg.includes('DisableExtensionsOnChromeUrlsSwitch')))
     const entry = record.targets.api
     const tabId = Number(entry.targetId)
     const is_attached = async () => (await call('chrome.debugger.getTargets', {}, null)).find(target => target.tabId === tabId).attached
@@ -66,12 +70,71 @@ test('reverse targets and XPath default to browser APIs, with explicit debugger 
     assert.equal((await call('_.click', { xpath: '//missing', attempts: 1 })).result.value, false)
     assert.equal((await call('_.find', { xpath: '//*[@id="value"]' })).result.value.items[0].value, 'before')
     assert.equal(await is_attached(), false, 'fixed XPath functions work under CSP without debugger or eval')
+    const execute = code => call('chrome.userScripts.execute', {
+      args: [{
+        target: { tabId },
+        world: 'MAIN',
+        js: [{ code }],
+      }],
+    }, null)
+    assert.equal((await execute('window.clientSourceValue = 42; document.querySelector("h1").dataset.source = "client"; Promise.resolve(window.clientSourceValue)'))[0].result, 42)
+    assert.deepEqual((await execute('({ value: window.clientSourceValue, dom: document.querySelector("h1").dataset.source })'))[0].result, {
+      value: 42,
+      dom: 'client',
+    })
+    const dynamic = (await execute('(()=>{const result={};try{eval("42")}catch(error){result.eval=error.message};try{new Function("return 42")()}catch(error){result.function=error.message};return result})()'))[0].result
+    assert.match(dynamic.eval, /unsafe-eval/)
+    assert.match(dynamic.function, /unsafe-eval/)
+    assert.equal(await is_attached(), false, 'native MAIN source injection does not attach a debugger or disable page CSP')
     const disconnected = util.on_first(client, 'close')
     record.socket.close()
     await disconnected
     assert.equal((await call('_.find', { xpath: '//h1' })).result.value.count, 1)
     assert.equal(await is_attached(), false, 'API routing reconnects without debugger attachment')
-    await assert.rejects(client.evaluate_xpath({ target: 'api', xpath: '//h1' }, xpath => xpath), /Browser API evaluation failed/)
+    assert.equal((await client.evaluate_xpath({ target: 'api', xpath: '//h1' }, xpath => document.evaluate(xpath, document, null, 9, null).singleNodeValue.textContent)).result.value, 'API test')
+    await client.call({
+      method: 'Browser.getVersion',
+      params: {
+        browser: {
+          name: 'manual',
+          user_data_dir: path.join(directory, 'manual'),
+          cdp_ext_user_scripts: false,
+        },
+      },
+    })
+    const manual = (method, params = {}, target = null) => client.call({
+      method,
+      params: {
+        browser: 'manual',
+        target,
+        ...params,
+      },
+    })
+    await assert.rejects(manual('chrome.userScripts.getScripts'), error => !!error.cdp)
+    assert.equal(client.browsers.manual.proc.spawnargs.includes('--extensions-on-chrome-urls'), false)
+    assert.equal(JSON.parse(await fs.readFile(path.join(client.browsers.manual.extension_path, 'manifest.json'), 'utf8')).host_permissions.includes('chrome://extensions/*'), false)
+    await manual('chrome.tabs.query', { args: [{}] }, {
+      name: 'page',
+      create_params: { url: 'http://127.0.0.1:' + page_server.address().port + '/csp' },
+    })
+    const manual_tab = Number(client.browsers.manual.targets.page.targetId)
+    for (let i = 0; i < 100; i++) {
+      if ((await manual('chrome.tabs.get', { args: [manual_tab] })).status === 'complete') break
+      await new Promise(resolve => setTimeout(resolve, 30))
+    }
+    assert.equal((await manual('_.find', { xpath: '//h1' }, 'page')).result.value.count, 1, 'fixed XPath needs no user-script consent')
+    await assert.rejects(client.call({
+      method: 'Browser.getVersion',
+      params: {
+        browser: {
+          name: 'blocked-setup',
+          user_data_dir: path.join(directory, 'blocked-setup'),
+          args: { 'extensions-on-chrome-urls': false },
+        },
+      },
+    }), /Extension setup failed:.*Cannot access/)
+    assert.equal((await client.evaluate_xpath({ target: 'api', xpath: '//h1' }, () => undefined)).result.type, 'undefined')
+    await assert.rejects(client.evaluate_xpath({ target: 'api', xpath: '//h1' }, () => { throw new Error('XPath callback failed') }), /XPath callback failed/)
     assert.equal(await is_attached(), false, 'arbitrary API code has no debugger fallback')
     await assert.rejects(call('_.find', { xpath: '//h1', execution_mode: 'invalid' }), /execution_mode/)
     let attachments = 0
@@ -115,10 +178,9 @@ test('reverse targets and XPath default to browser APIs, with explicit debugger 
     }
     assert.equal((await client.evaluate_xpath({ target: 'api', xpath: '//h1' }, xpath => document.evaluate(xpath, document, null, 9, null).singleNodeValue.textContent)).result.value, 'API test')
   } finally {
-    const proc = client.browsers.main?.proc
-    const exited = proc?.exitCode === null ? once(proc, 'exit') : null
+    const exited = Object.values(client.browsers).filter(record => record.proc?.exitCode === null).map(record => once(record.proc, 'exit'))
     await client.close()
-    await exited
+    await Promise.all(exited)
     page_server.closeAllConnections()
     await new Promise(resolve => page_server.close(resolve))
   }
@@ -778,7 +840,6 @@ test('managed reverse launch uses extension identity and keeps a live process th
           },
           expression: 'chrome.developerPrivate.updateExtensionConfiguration(' + JSON.stringify({
             extensionId: browser.extension_id(extension),
-            userScriptsAccess: true,
             incognitoAccess: true,
           }) + ').then(() => true)',
           awaitPromise: true,
@@ -1147,9 +1208,12 @@ test('extension installation defaults to the effective directory without opening
   })
   let expected_install = false
   let expected_directory = false
+  let expected_user_scripts = false
   browser.launch = async options => {
     assert.equal(options.cdp_ext_install, expected_install)
     assert.equal(!!browser.build_args(options)['user-data-dir'], expected_directory)
+    assert.equal(options.cdp_ext_user_scripts, expected_user_scripts)
+    assert.equal(new URL(options.bootstrap_url).searchParams.has('user_scripts'), options.cdp_ext_user_scripts)
     assert.equal(new URL(options.bootstrap_url).searchParams.get('browser'), options.name)
     throw new Error('Link opening intercepted')
   }
@@ -1198,6 +1262,14 @@ test('extension installation defaults to the effective directory without opening
         install: false,
       },
       {
+        name: 'user-scripts-off',
+        spec: {
+          user_data_dir: path.join(directory, 'user-scripts-off'),
+          cdp_ext_user_scripts: false,
+        },
+        install: true,
+      },
+      {
         name: 'no-preferences',
         spec: {
           user_data_dir: path.join(directory, 'no-preferences'),
@@ -1219,6 +1291,7 @@ test('extension installation defaults to the effective directory without opening
       const user_data_dir = scenario.spec.args?.['user-data-dir'] ?? scenario.spec.user_data_dir
       expected_directory = !!user_data_dir
       expected_install = scenario.install
+      expected_user_scripts = expected_install && expected_directory && scenario.spec.cdp_ext_user_scripts !== false
       await assert.rejects(client.call({
         method: 'Browser.getVersion',
         params: {
@@ -1231,6 +1304,10 @@ test('extension installation defaults to the effective directory without opening
       const record = client.browsers[scenario.name]
       assert.equal(!!record.extension_path, scenario.install)
       if (record.extension_path) assert.ok(record.extension_path.startsWith(directory))
+      if (record.extension_path) {
+        const manifest = JSON.parse(await fs.readFile(path.join(record.extension_path, 'manifest.json'), 'utf8'))
+        assert.equal(manifest.host_permissions.includes('chrome://extensions/*'), record.cdp_ext_user_scripts)
+      }
       const profile = user_data_dir || path.join(directory, scenario.name)
       const preferences = fs.access(path.join(profile, 'Default', 'Preferences'))
       const local_state = fs.access(path.join(profile, 'Local State'))
@@ -1240,6 +1317,18 @@ test('extension installation defaults to the effective directory without opening
         assert.rejects(local_state, { code: 'ENOENT' }),
       ])
       assert.equal(client.server, null)
+    }
+    for (const spec of [{ user_data_dir: null }, { user_data_dir: directory, cdp_ext_install: false }]) {
+      await assert.rejects(client.call({
+        method: 'Browser.getVersion',
+        params: {
+          browser: {
+            name: 'invalid-user-scripts-' + String(spec.cdp_ext_install),
+            ...spec,
+            cdp_ext_user_scripts: true,
+          },
+        },
+      }), /requires cdp_ext_install and a custom user-data-dir/)
     }
   } finally {
     browser.launch = launch

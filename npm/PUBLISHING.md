@@ -70,9 +70,14 @@ and README automatically. Tests, profiles, tools, and local references stay out.
 Use `npm pack ./npm` to create a local archive if needed.
 For releases affecting reverse mode, install that archive into a disposable
 directory and exercise a managed `cdp_ext: true` launch under Deno and Bun from the
-installed entry point. The manager must find both packaged extension files and
+installed entry point. The manager must find the packaged extension files and
 write its profile-specific copy automatically. Check the copied worker bytes and
-the source manifest and trigger's server URL; it must not depend on repository source paths.
+trigger's server URL; it must not depend on repository source paths. The managed
+manifest differs from the shipped source only by `chrome://extensions/*` host
+access when `cdp_ext_user_scripts` is enabled. Confirm userScripts access is
+enabled automatically only in that managed custom profile, and native MAIN source
+injection works under restrictive page CSP without debugger attachment. Test the
+opt-out with an ungranted profile too.
 Confirm both sidebar assets are copied too and the manifest's `side_panel.default_path`
 points to the packaged HTML page.
 

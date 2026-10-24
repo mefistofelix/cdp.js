@@ -246,6 +246,7 @@ local configuration.
 | `websocket_url` | string, unset | Attach directly to a browser WebSocket endpoint. |
 | `cdp_ext` | boolean, `false` | Use the extension transport under Deno/Bun: start the shared reverse listener and open a local bootstrap URL containing the logical browser name and WebSocket endpoint. No extension ID is required. |
 | `cdp_ext_install` | boolean, presence of an effective user-data directory | Prepare an extension copy and startup loading arguments. Defaults on for an explicit custom directory, off for the system profile. `false` uses an already installed extension. Only applies with `cdp_ext: true`. |
+| `cdp_ext_user_scripts` | boolean, `cdp_ext_install` plus an effective custom directory | Automatically enable Allow User Scripts for the managed bridge. False preserves the current grant. True requires installation and a custom directory; system/passive browsers use manual consent. See activation below. |
 | `reverse` | boolean, `false` | Attach to an externally launched extension instead of launching or discovering a browser. Starts the shared listener on first use under Deno or Bun. |
 | `extension_id` | string, browser name for passive `reverse: true` attachment | Optional legacy incoming extension identity. Not needed with `cdp_ext: true`; observed automatically from the connection. |
 | `http_url` | string, unset | Discover the endpoint from an HTTP(S) base URL or exact `/json/version` URL. |
@@ -924,7 +925,8 @@ every past attachment or identify the caller by itself.
 For native script-text injection without changing the page's CSP,
 `chrome.userScripts.execute` (Chrome 135+) accepts `js[].code`. Its default
 `USER_SCRIPT` world shares the DOM but has separate JavaScript globals and is exempt
-from the page's CSP. `MAIN` instead shares the page's globals and CSP.
+from the page's CSP. `MAIN` shares the page's globals; source injection and later
+calls to eval/new Function have different CSP behavior, explained below.
 
 ```js
 const frames = await client.call({
@@ -944,18 +946,102 @@ const frames = await client.call({
 console.log(frames[0].result) // 42
 ```
 
-The manifest includes the permission, but Chrome also requires explicit user
-activation: Developer mode before Chrome 138, or **Allow User Scripts** on the
-extension's details page from Chrome 138 onward. Open
-`chrome://extensions/?id=<extension_id>` using `client.browsers.work.extension_id`.
-If necessary, reload the extension after enabling the toggle. Neither `cdp_ext: true`
-nor `extensions` enables it or adds a default profile setting. A previously enabled
-profile retains its choice. Chrome stores the extension-specific
-`extensions.settings.<extension_id>.user_scripts_enabled` setting; on Windows it
-is in protected `Secure Preferences`, and simply writing the key into a fresh
-profile did not enable access in our test. Use Chrome's toggle rather than assuming
-a normal `preferences` entry can update protected extension settings.
-See the native [userScripts API and activation steps](https://developer.chrome.com/docs/extensions/reference/api/userScripts).
+### Arbitrary client code in MAIN, without debugger
+
+`chrome.userScripts.execute` also accepts `world: 'MAIN'`. With user-script access
+enabled, Chrome compiles the supplied `js[].code` directly in the page's JavaScript
+world. The source can arrive from the JSON-RPC client at runtime. It can read/write
+page globals and the DOM, including on a page with `script-src 'none'`, without
+debugger attachment or changing the page's CSP:
+
+```js
+const frames = await client.call({
+  method: 'chrome.userScripts.execute',
+  params: {
+    browser: 'work',
+    args: [{
+      target: { tabId },
+      world: 'MAIN',
+      js: [{
+        code: 'window.clientValue = 42; document.querySelector("h1").dataset.source = "client"; Promise.resolve(window.clientValue)',
+      }],
+    }],
+  },
+})
+console.log(frames[0].result) // 42
+```
+
+This is native source injection, not a call to `eval`. If the injected source
+itself calls `eval` or `new Function` in MAIN, those operations still obey the
+page's CSP and can remain blocked. The Allow User Scripts toggle enables this
+API; it does not globally enable string evaluation in MAIN, the worker, or normal
+`chrome.scripting.executeScript` calls. No additional RPC method is needed.
+
+In `USER_SCRIPT`, the DOM is shared but page JavaScript globals are separate.
+That world's own CSP can permit eval/new Function through
+`chrome.userScripts.configureWorld`, with a CSP such as
+`script-src 'self' 'unsafe-eval'; object-src 'self'`. Configure the world before its
+first injection into a document, or configure a fresh `worldId` and use that ID
+when injecting. Changing the configuration after a world already exists did not
+relax that existing world's CSP in our Chrome test. `configureWorld` does not
+configure MAIN's CSP. Plain `js[].code` injection needs neither eval nor this
+additional world configuration.
+
+These behaviors were verified on real Chrome with a restrictive page CSP:
+MAIN source execution returned a Promise result, shared page globals and changed
+the DOM while the tab remained debugger-detached; eval and new Function inside
+that MAIN source remained blocked. The native API and result arrays already pass
+through the bridge unchanged. See [Chrome userScripts](https://developer.chrome.com/docs/extensions/reference/api/userScripts).
+The migration discussion in [Tampermonkey #644](https://github.com/Tampermonkey/tampermonkey/issues/644#issuecomment-2094925643)
+and its [Content Script API documentation](https://www.tampermonkey.net/documentation.php?locale=en&q=content_script_api)
+describe the corresponding native user-script injection mechanism.
+
+### User-script consent: system and managed profiles
+
+The shipped manifest already declares `userScripts`, but a manifest permission
+alone cannot turn on Chrome's user consent. Before Chrome 138 the gate is Developer
+mode; from Chrome 138 it is **Allow User Scripts** for the individual extension.
+
+For a **system profile**, passive `reverse: true`, or `cdp_ext_install: false`,
+enable it manually in `chrome://extensions/?id=<extension_id>` using the observed
+`client.browsers.work.extension_id`. This is a per-extension/profile choice, not
+something to repeat at every connection. Reload the extension if the API is still
+unavailable after enabling it. Use the shipped `cdp_ext/` folder for manual installs.
+
+For **managed custom profiles**, `cdp_ext_user_scripts` defaults to true when
+`cdp_ext: true`, `cdp_ext_install: true` and an effective custom user-data directory
+are all present. Effective raw directory overrides count, including null/false
+overrides that remove the directory. Before announcing a new bootstrap binding,
+the bridge checks access and, if needed, uses Chrome's own extensions-settings UI
+API to enable it for its own extension. It briefly opens an inactive internal
+settings tab, runs a fixed native scripting function, and closes that tab. This
+uses no debugger and no remote-debugging flags.
+
+This developer setup needs generated `extensions-on-chrome-urls: true` and
+`DisableExtensionsOnChromeUrlsSwitch` in `disable-features`. The manager adds
+`chrome://extensions/*` only to the **managed copy** of the manifest. The shipped
+manifest remains suitable for a normal manual installation. The worker and sidebar
+files are copied unchanged. Chrome writes its own protected permission settings;
+the library does not edit `Secure Preferences` or compute preference signatures.
+Legacy Chrome uses the internal Developer mode setting instead of the newer
+per-extension setting; the automatic path is tested on Chrome 154.
+
+Set `cdp_ext_user_scripts: false` to skip the permission step, extra host access
+and development flags. Existing grants are preserved. Explicit true without both
+installation and a custom directory rejects before launching; it never infers or
+modifies the system profile. `update_preferences: false` controls JSON file writes
+independently and does not turn off this native permission setup. Raw CLI overrides
+still win; disabling a required switch can make setup fail. Such failures reach
+the caller through the initial reverse announcement and appear in the local
+trigger history, rather than being reported as a successful connection.
+An already running Chrome cannot adopt new command-line capabilities or a changed
+loaded manifest; restart that custom-profile browser after enabling this option.
+
+The internal settings API and developer switches are Chrome implementation
+details; unsupported browsers/policies produce errors. Simply writing
+`extensions.settings.<extension_id>.user_scripts_enabled` into `Preferences` did
+not enable access in our Windows test because Chrome protects these settings.
+See the native [activation steps](https://developer.chrome.com/docs/extensions/reference/api/userScripts).
 
 Chrome's native `scripting.executeScript` still rejects strings supplied directly
 as `func`; the bridge's fixed function makes this adaptation possible. Overriding
@@ -1307,6 +1393,10 @@ See [Chrome's debugging-port restrictions](https://developer.chrome.com/blog/rem
 | `login: true` plus `args['disable-sync']: true` | Allow profile sign-in through generated preferences while still requesting sync to be disabled. |
 | Any high-level settings plus a raw `disable-features` array | Replace the generated list, including translation/sign-in additions; an active `disable-extensions-except` still appends its required feature ID. |
 | `user_data_dir` plus `args['user-data-dir']` | The raw argument determines both the profile write location and the launched browser directory. |
+| Managed extension plus effective custom directory | Default `cdp_ext_user_scripts` to true; grant through Chrome's own UI API before accepting the reverse binding. |
+| `cdp_ext_user_scripts: false` plus an existing grant | Preserve the grant, skip the permission step and omit its extra generated flags/manifest host. |
+| `cdp_ext_user_scripts: true` without custom directory or installation | Reject before launch; the system profile remains a manual choice. |
+| `update_preferences: false` plus automatic user-script consent | Skip JSON preference-file writes; still let Chrome apply its native per-extension grant. |
 | `port` plus `args['remote-debugging-port']` | Attach using `port`; no launch occurs, so the raw launch argument is unused. |
 | Constructor options plus an existing browser label | Reuse the stored record; configuration is not merged again on every call. |
 | `initialize: false` plus `runtime: true` or a binding name | Skip optional target setup, including domain enabling and binding installation. |
@@ -1658,7 +1748,13 @@ XPath snapshot length, even when `items` is limited or empty.
 not a complete parser; arbitrary nested or comma-containing arguments are outside
 that rewriting logic. Ordinary XPath expressions pass through unchanged.
 
-`client.evaluate_xpath(params, fn, options)` is available for other helpers:
+`_.find` and `_.click` already contain fixed browser-side functions. In API mode
+only the XPath string and data options are sent to them; neither needs user-script
+consent, eval or new Function. This is the appropriate path for those two built-ins.
+
+`client.evaluate_xpath(params, fn, options)` is a separate, general-purpose callback
+helper: its `fn` parameter is executable code supplied by its caller, not just an
+XPath string. It is available for other helpers:
 
 ```js
 const text = await client.evaluate_xpath({
@@ -1679,14 +1775,17 @@ console.log(text.result.value)
 the target as `fn(normalizedXPath, options)`; it cannot capture Node.js variables
 or imported helpers. `options` must be JSON-serializable; omission becomes null
 in the argument array. Direct/debugger results retain native `exceptionDetails`
-if page code throws. In reverse API mode this arbitrary-function helper uses the
-existing string-function scripting adapter in the **MAIN** world and returns
-`{ result: { type, value } }`. Unlike the two fixed built-ins, arbitrary source
-evaluation requires the page CSP to allow eval. Injection errors or missing
-execution results reject; no debugger, CSP bypass or user-script toggle is enabled
-automatically. Choose `execution_mode: 'debugger'` explicitly when native CDP
-evaluation is required. Native `chrome.scripting.executeScript` calls retain their
-existing native world default and native result array.
+if page code throws. In reverse API mode this arbitrary-function helper compiles
+the serialized invocation directly through `chrome.userScripts.execute` in the
+**MAIN** world and returns `{ result: { type, value } }`. It requires user-script
+access, automatically prepared for managed profiles as described above. The
+wrapper awaits the callback and preserves undefined values; callback exceptions
+reject with their message. It does not use eval/new Function, change CSP, or fall
+back to the debugger. A callback that itself invokes eval still obeys page CSP.
+Choose `execution_mode: 'debugger'` explicitly when native CDP evaluation is
+required. Native `chrome.scripting.executeScript` calls keep their existing string
+adapter, native world default and native result array; the fixed XPath built-ins
+do not use that string adapter either.
 
 ### Register, replace or remove handlers
 
@@ -1987,10 +2086,13 @@ cover native string rejection, ignored custom string conversions, the bridge's
 string-function adapter and async arguments/results. Real page CSP checks cover
 both evaluators in both worlds, explicit debugger bypass after reload, and explicit
 header removal through session rules. User-script checks cover default denied
-access and explicit activation, DOM changes and Promise results under restrictive
-page CSP. Only disposable-profile preparation uses direct CDP to operate Chrome's
-Allow User Scripts and Allow in incognito toggles; subsequent reverse execution
-uses no remote-debugging flags and never enables these grants automatically.
+access in external/opt-out profiles, automatic consent in managed custom profiles,
+MAIN globals, DOM changes and Promise results under restrictive page CSP, and
+continued CSP restrictions on eval/new Function. Generic XPath callbacks run through
+native userScripts while fixed XPath commands work even with userScripts denied.
+Only disposable incognito-grant preparation uses direct CDP to operate Chrome's
+Allow in incognito toggle; reverse execution and automatic user-script consent
+use no remote-debugging flags or debugger attachment.
 Managed-launch coverage checks concurrent first use, profile-specific identity,
 connection timeout without process replacement, lazy listener startup/shutdown
 independent of direct browsers, and relaunch after confirmed exit. External reverse
